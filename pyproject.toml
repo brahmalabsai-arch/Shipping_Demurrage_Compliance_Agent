@@ -1,0 +1,111 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "customs-copilot"
+version = "0.1.0"
+description = "Port & Customs Clearance Copilot — multi-agent shipment verification, demurrage risk and HITL clearance."
+requires-python = ">=3.11"
+# Runtime dependencies are added phase by phase, as each phase first needs them.
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    "chromadb>=1.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.5",
+    "black>=24.4",
+    "mypy>=1.10",
+]
+
+[tool.setuptools.packages.find]
+include = [
+    "config*",
+    "models*",
+    "services*",
+    "mcp_servers*",
+    "agents*",
+    "rag*",
+    "scheduler*",
+    "integrations*",
+]
+
+# --------------------------------------------------------------------------- black
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+# --------------------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["docs"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+# E501 is black's job.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "config",
+    "models",
+    "services",
+    "mcp_servers",
+    "agents",
+    "rag",
+    "scheduler",
+    "integrations",
+]
+
+# --------------------------------------------------------------------------- mypy
+# Strict everywhere by default (conventions §1 requires strict on services/, agents/,
+# mcp_servers/); dashboards and tests are relaxed below.
+# python_version is deliberately unset: mypy targets the running interpreter, since third-party
+# stubs (e.g. numpy's) use syntax newer than 3.11. The CI matrix covers the 3.11 floor.
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+# alembic/ would shadow the installed `alembic` package as a module name.
+exclude = ["^\\.venv/", "^alembic/", "^docs/", "^build/"]
+
+[[tool.mypy.overrides]]
+module = ["dashboards.*", "tests.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+# --------------------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers --strict-config -m 'not integration'"
+markers = [
+    "integration: needs the docker-compose stack running (run with: pytest -m integration)",
+]
