@@ -1,10 +1,10 @@
-"""Create the application role and database on the local, natively installed PostgreSQL.
+"""Create the application role, app database and test database on the local PostgreSQL.
 
 Idempotent — safe to re-run (it also re-syncs the role's password with ``.env``). Role name,
 database name and password come from ``config.Settings``; psql prompts for the *superuser*
 password itself, so that password is never written to disk.
 
-    .venv\\Scripts\\python.exe scripts\\setup_local_db.py [--superuser postgres] [--psql PATH]
+    .venv\\Scripts\\python.exe -m scripts.setup_local_db [--superuser postgres] [--psql PATH]
 """
 
 import argparse
@@ -50,11 +50,15 @@ def main() -> int:
         "--set", f"app_user={settings.postgres_user}",
         "--set", f"app_password={settings.postgres_password.get_secret_value()}",
         "--set", f"app_db={settings.postgres_db}",
+        "--set", f"app_test_db={settings.postgres_test_db}",
         "--file", str(SQL_FILE),
     ]  # fmt: skip
     result = subprocess.run(command, check=False)
     if result.returncode == 0:
-        print(f"OK: role '{settings.postgres_user}' and database '{settings.postgres_db}' ready.")
+        print(
+            f"OK: role '{settings.postgres_user}', databases '{settings.postgres_db}' and "
+            f"'{settings.postgres_test_db}' ready."
+        )
     return result.returncode
 
 

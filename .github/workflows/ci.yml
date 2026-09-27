@@ -23,11 +23,11 @@ jobs:
       - run: ruff check .
       - run: black --check .
       - run: mypy .
-      - run: pytest
+      - run: pytest -m "not db"
 
   # Docker is used here only, on GitHub's runner — never in local development.
-  integration:
-    name: Postgres integration tests
+  db:
+    name: Postgres tests (migrations, services, dashboards)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,11 +36,13 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: pip install -e ".[dev]"
-      - name: Write CI .env
-        run: echo "POSTGRES_PASSWORD=ci-only-password" > .env
+      - name: Write CI .env (one throwaway DB serves as both app and test DB)
+        run: |
+          echo "POSTGRES_PASSWORD=ci-only-password" > .env
+          echo "POSTGRES_TEST_DB=customs_copilot" >> .env
       - run: docker compose up -d --wait
-      - run: pytest -m integration
-      - name: Alembic reaches the database
-        run: alembic upgrade head && alembic current
+      - name: Migrations apply and match the ORM models
+        run: alembic upgrade head && alembic check
+      - run: pytest -m db
       - if: always()
         run: docker compose down -v

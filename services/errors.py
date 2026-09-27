@@ -7,3 +7,34 @@ the exact type (conventions §2). Concrete subclasses are added in the phase tha
 
 class CustomsCopilotError(Exception):
     """Root of every domain exception, so callers can catch all domain failures in one place."""
+
+
+# --------------------------------------------------------------------------- shipping (Phase 1)
+
+
+class ShipmentNotFoundError(CustomsCopilotError):
+    """No shipment exists with the given id or container_id."""
+
+
+class DuplicateContainerError(CustomsCopilotError):
+    """A shipment with this container_id already exists (surfaced from the unique constraint)."""
+
+
+class InvalidStatusTransitionError(CustomsCopilotError):
+    """The requested status change is not an allowed lifecycle transition."""
+
+
+class ShipmentCancelledError(CustomsCopilotError):
+    """The shipment was cancelled; analysis and edits must stop rather than proceed."""
+
+
+class InvalidShipmentDataError(CustomsCopilotError):
+    """An edit would leave the shipment internally inconsistent (e.g. eta before etd)."""
+
+
+class DocumentNotFoundError(CustomsCopilotError):
+    """No document exists with the given id."""
+
+
+class DocumentSupersededError(CustomsCopilotError):
+    """Only the latest version of a document can be amended."""

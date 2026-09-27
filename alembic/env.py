@@ -8,9 +8,9 @@ schema it introduces. The ``alembic_version`` table stays in ``public``.
 
 from logging.config import fileConfig
 
-from sqlalchemy import create_engine, pool
-
 from alembic import context
+from sqlalchemy import Connection, create_engine, pool
+
 from config.settings import get_settings
 from models.db_models import Base
 
@@ -37,20 +37,31 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def _run_with(connection: Connection) -> None:
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_schemas=True,
+        compare_type=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
+
+
 def run_migrations_online() -> None:
-    """Run migrations against the live database configured in ``.env``."""
+    """Run migrations against the live database configured in ``.env``.
+
+    A caller (the pytest harness) may instead hand over an open connection via
+    ``config.attributes["connection"]`` to migrate a different database, e.g. the test DB.
+    """
+    supplied = config.attributes.get("connection")
+    if supplied is not None:
+        _run_with(supplied)
+        return
+
     connectable = create_engine(get_settings().database_url, poolclass=pool.NullPool)
-
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            include_schemas=True,
-            compare_type=True,
-        )
-
-        with context.begin_transaction():
-            context.run_migrations()
+        _run_with(connection)
 
 
 if context.is_offline_mode():

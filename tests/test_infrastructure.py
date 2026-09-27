@@ -1,7 +1,7 @@
 """Phase 0 exit check: the data stores are usable.
 
-Postgres is the local native install (set up once with scripts/setup_local_db.py) and needs
-``pytest -m integration``. ChromaDB is embedded, so its check runs in the default suite.
+Postgres is the local native install (set up once with scripts/setup_local_db.py); its check is
+marked ``db``. ChromaDB is embedded, so its check needs no server.
 """
 
 from pathlib import Path
@@ -13,7 +13,7 @@ from sqlalchemy import create_engine, text
 from config.settings import get_settings
 
 
-@pytest.mark.integration
+@pytest.mark.db
 def test_postgres_accepts_connections_with_utc_sessions() -> None:
     engine = create_engine(get_settings().database_url)
     try:

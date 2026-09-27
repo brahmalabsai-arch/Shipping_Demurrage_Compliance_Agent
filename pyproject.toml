@@ -15,6 +15,8 @@ dependencies = [
     "alembic>=1.13",
     "psycopg[binary]>=3.2",
     "chromadb>=1.5",
+    "streamlit>=1.40",
+    "tzdata>=2024.1",  # zoneinfo data (Asia/Kolkata) on Windows
 ]
 
 [project.optional-dependencies]
@@ -36,6 +38,7 @@ include = [
     "rag*",
     "scheduler*",
     "integrations*",
+    "dashboards*",
 ]
 
 # --------------------------------------------------------------------------- black
@@ -73,7 +76,12 @@ known-first-party = [
     "rag",
     "scheduler",
     "integrations",
+    "dashboards",
+    "scripts",
+    "tests",
 ]
+# The local alembic/ migrations folder would otherwise make ruff treat the library as ours.
+known-third-party = ["alembic"]
 
 # --------------------------------------------------------------------------- mypy
 # Strict everywhere by default (conventions §1 requires strict on services/, agents/,
@@ -105,7 +113,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-ra --strict-markers --strict-config -m 'not integration'"
+addopts = "-ra --strict-markers --strict-config"
 markers = [
-    "integration: needs the docker-compose stack running (run with: pytest -m integration)",
+    "db: needs PostgreSQL (POSTGRES_TEST_DB); auto-applied to tests using the DB fixtures",
 ]

@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     postgres_user: str = "customs"
     postgres_password: SecretStr
     postgres_db: str = "customs_copilot"
+    postgres_test_db: str = "customs_copilot_test"
     postgres_host: str = "localhost"
     postgres_port: int = 5432
 
@@ -51,13 +52,21 @@ class Settings(BaseSettings):
 
         Built rather than stored so docker-compose and the app share one set of variables.
         """
+        return self._url(self.postgres_db)
+
+    @property
+    def test_database_url(self) -> URL:
+        """URL of the disposable database that pytest rebuilds on every run."""
+        return self._url(self.postgres_test_db)
+
+    def _url(self, database: str) -> URL:
         return URL.create(
             drivername="postgresql+psycopg",
             username=self.postgres_user,
             password=self.postgres_password.get_secret_value(),
             host=self.postgres_host,
             port=self.postgres_port,
-            database=self.postgres_db,
+            database=database,
         )
 
 

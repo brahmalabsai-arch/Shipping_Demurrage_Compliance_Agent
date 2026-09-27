@@ -6,8 +6,30 @@ its own Postgres schema (``shipping``, ``demurrage``, ``fx``, ``compliance``, ``
 ``audit``).
 """
 
-from sqlalchemy import MetaData
-from sqlalchemy.orm import DeclarativeBase
+import uuid
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from enum import StrEnum
+from typing import Any
+
+from sqlalchemy import (
+    CHAR,
+    Date,
+    DateTime,
+    Enum,
+    ForeignKey,
+    Integer,
+    MetaData,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
+
+from models.enums import DocType, ShipmentStatus
 
 # Deterministic constraint names so Alembic autogenerate produces stable, reviewable migrations.
 NAMING_CONVENTION = {
@@ -25,3 +47,100 @@ class Base(DeclarativeBase):
     """Declarative base shared by every ORM model; its metadata is Alembic's target."""
 
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+
+def utcnow() -> datetime:
+    """Timezone-aware 'now' in UTC — the only clock used for stored timestamps (conventions §3)."""
+    return datetime.now(UTC)
+
+
+def _pg_enum(enum_cls: type[StrEnum], name: str, schema: str) -> Enum:
+    # Store the lowercase .value (e.g. 'in_transit'), not the member name.
+    return Enum(
+        enum_cls,
+        name=name,
+        schema=schema,
+        values_callable=lambda members: [m.value for m in members],
+    )
+
+
+def _uuid_pk() -> MappedColumn[uuid.UUID]:
+    return mapped_column(
+        primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()")
+    )
+
+
+# --------------------------------------------------------------------------- shipping
+
+
+class Shipment(Base):
+    """A container shipment and its lifecycle dates (architecture §3.1)."""
+
+    __tablename__ = "shipments"
+    __table_args__ = (UniqueConstraint("container_id"), {"schema": "shipping"})
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    container_id: Mapped[str] = mapped_column(Text)
+    status: Mapped[ShipmentStatus] = mapped_column(
+        _pg_enum(ShipmentStatus, "shipment_status", "shipping")
+    )
+    cargo_type: Mapped[str] = mapped_column(Text)
+    hs_code: Mapped[str] = mapped_column(Text)
+    declared_qty: Mapped[Decimal] = mapped_column(Numeric)
+    declared_value: Mapped[Decimal] = mapped_column(Numeric)
+    declared_currency: Mapped[str] = mapped_column(CHAR(3))
+    origin_port: Mapped[str] = mapped_column(Text)
+    destination_port: Mapped[str] = mapped_column(Text)
+    etd: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    eta: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    quote_date: Mapped[date | None] = mapped_column(Date)
+    quote_validity_days: Mapped[int | None] = mapped_column(Integer)
+    quote_expiry_date: Mapped[date | None] = mapped_column(Date)
+    bol_date: Mapped[date | None] = mapped_column(Date)
+    invoice_date: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now(), onupdate=utcnow
+    )
+
+
+class Document(Base):
+    """A shipment document version; amendments chain via ``superseded_by`` (architecture §3.2)."""
+
+    __tablename__ = "documents"
+    __table_args__ = ({"schema": "shipping"},)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    shipment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("shipping.shipments.id"), index=True)
+    doc_type: Mapped[DocType] = mapped_column(_pg_enum(DocType, "doc_type", "shipping"))
+    version: Mapped[int] = mapped_column(Integer)
+    qty: Mapped[Decimal | None] = mapped_column(Numeric)
+    value: Mapped[Decimal | None] = mapped_column(Numeric)
+    currency: Mapped[str | None] = mapped_column(CHAR(3))
+    issued_date: Mapped[date] = mapped_column(Date)
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("shipping.documents.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+
+
+# --------------------------------------------------------------------------- audit
+
+
+class AuditEvent(Base):
+    """One agent action or human decision; written in the same transaction as the change."""
+
+    __tablename__ = "events"
+    __table_args__ = ({"schema": "audit"},)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    actor: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    entity_type: Mapped[str] = mapped_column(Text)
+    entity_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now(), index=True
+    )

@@ -30,8 +30,9 @@
 capstone-customs-copilot/
 ├── docker-compose.yml                # GitHub CI only (Postgres) — not used locally
 ├── .env.example
-├── scripts/
-│   └── setup_local_db.py             # one-time local role + database creation
+├── scripts/                          # run as modules: python -m scripts.<name>
+│   ├── setup_local_db.py             # one-time local role + app DB + test DB creation
+│   └── seed_shipments.py             # idempotent seed of the 4 fixture shipments
 ├── alembic/                          # schema migrations
 ├── services/                         # single source of truth — see §4
 │   ├── shipping_service.py
@@ -92,7 +93,9 @@ All tables live in one PostgreSQL database (`customs_copilot`), separated by sch
 ```
 id                UUID PK
 container_id      TEXT UNIQUE
-status            ENUM('quoted','booked','in_transit','docked','under_review','cleared','held','closed')
+status            ENUM('quoted','booked','in_transit','docked','under_review','cleared','held','closed','cancelled')
+                  -- 'cancelled' is terminal; reachable only before docking. Allowed moves:
+                  -- services/shipping_service.py::TRANSITIONS
 cargo_type        TEXT
 hs_code           TEXT
 declared_qty      NUMERIC
@@ -190,7 +193,7 @@ change_log: id UUID PK, prior_snapshot_id UUID, new_snapshot_id UUID,
             detected_at TIMESTAMPTZ, emailed_at TIMESTAMPTZ NULL
 ```
 
-### 3.9 `audit.events`
+### 3.9 `audit.events` (created in migration `0001`, since every Phase 1 write is audited)
 ```
 id           UUID PK
 actor        TEXT         -- agent name or human identifier
@@ -203,7 +206,7 @@ created_at   TIMESTAMPTZ DEFAULT now()
 
 ## 4. Service layer — single source of truth
 
-Every domain gets one `services/<domain>_service.py` module of plain, typed, synchronous-or-async Python functions operating directly on the SQLAlchemy models (e.g. `create_shipment()`, `get_shipment(id)`, `list_pending_rules()`, `approve_rule(rule_id, reviewer)`, `resolve_fx_rate(pair, date, stage)`). **Both the MCP server tool handlers and the Streamlit dashboards call these same functions** — never a duplicate query. This is the mechanism that satisfies the "no drift between dashboard and MCP layer" convention: there is structurally only one code path to the data.
+Service functions take the caller's SQLAlchemy `Session` and only flush; the caller owns the transaction via `services/db.py::session_scope()`, so a change and its `audit.events` row commit atomically. Every domain gets one `services/<domain>_service.py` module of plain, typed, synchronous-or-async Python functions operating directly on the SQLAlchemy models (e.g. `create_shipment()`, `get_shipment(id)`, `list_pending_rules()`, `approve_rule(rule_id, reviewer)`, `resolve_fx_rate(pair, date, stage)`). **Both the MCP server tool handlers and the Streamlit dashboards call these same functions** — never a duplicate query. This is the mechanism that satisfies the "no drift between dashboard and MCP layer" convention: there is structurally only one code path to the data.
 
 ## 5. MCP layer — servers and tool contracts
 
