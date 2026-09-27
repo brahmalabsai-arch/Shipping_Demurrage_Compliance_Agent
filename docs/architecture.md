@@ -32,7 +32,9 @@ capstone-customs-copilot/
 ├── .env.example
 ├── scripts/                          # run as modules: python -m scripts.<name>
 │   ├── setup_local_db.py             # one-time local role + app DB + test DB creation
-│   └── seed_shipments.py             # idempotent seed of the 4 fixture shipments
+│   ├── seed.py                       # runs every domain seed (the one documented seed command)
+│   ├── seed_shipments.py             # idempotent seed of the 4 fixture shipments
+│   └── seed_port_rates.py            # idempotent seed of INNSA/INMUN demurrage tariffs
 ├── alembic/                          # schema migrations
 ├── services/                         # single source of truth — see §4
 │   ├── shipping_service.py
@@ -137,7 +139,11 @@ currency        CHAR(3)
 free_days       INTEGER
 daily_rate      NUMERIC
 effective_from  DATE
-effective_to    DATE NULL
+effective_to    DATE NULL        -- inclusive; NULL = open-ended
+-- EXCLUDE USING gist (port_code =, container_type =, daterange(effective_from, effective_to,'[]') &&)
+--   → periods for one tariff line never overlap, so a lookup matches at most one row.
+-- CHECK free_days >= 0 AND daily_rate >= 0; CHECK effective_to >= effective_from.
+-- container_type ∈ {20ft, 40ft, 40hc, 20rf, 40rf} (validated in Pydantic; column is TEXT).
 ```
 
 ### 3.4 `fx.spot_rates` (quotation stage)

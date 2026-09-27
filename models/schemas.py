@@ -12,7 +12,7 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from models.enums import DocType, ShipmentStatus
+from models.enums import ContainerType, DocType, ShipmentStatus
 
 # ISO 4217 *shape* only. Whether a code is a real currency (e.g. 'XYZ' is not) is the document
 # verification agent's call — it must flag it rather than have it rejected here (edge cases, Ph 7).
@@ -179,3 +179,56 @@ class DocumentRecord(BaseModel):
     issued_date: date
     superseded_by: UUID | None
     created_at: datetime
+
+
+# --------------------------------------------------------------------------- demurrage
+
+
+class PortRateUpsert(_Input):
+    """A port tariff to add, or to correct if one already starts on the same day.
+
+    ``effective_to`` is inclusive. Leave it empty to run until the next scheduled period (or
+    open-ended if there is none). ``ge=0`` rejects negative rates/free days here, before they
+    reach the service (edge cases, Phase 2); ``free_days=0`` is valid (charges from day 1).
+    """
+
+    port_code: PortCode
+    container_type: ContainerType
+    currency: CurrencyCode
+    free_days: Annotated[int, Field(ge=0)]
+    daily_rate: NonNegativeDecimal
+    effective_from: date
+    effective_to: date | None = None
+
+    @model_validator(mode="after")
+    def _valid_period(self) -> Self:
+        if self.effective_to is not None and self.effective_to < self.effective_from:
+            raise ValueError("effective_to cannot be before effective_from")
+        return self
+
+
+class PortRateRecord(BaseModel):
+    """A port tariff period as returned across the service boundary."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    port_code: str
+    container_type: ContainerType
+    currency: str
+    free_days: int
+    daily_rate: Decimal
+    effective_from: date
+    effective_to: date | None
+
+
+class DemurrageCharge(BaseModel):
+    """Charge for a stay at port under one tariff, with the figures it was built from."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rate: PortRateRecord
+    days_in_port: int
+    chargeable_days: int
+    amount: Decimal
+    currency: str

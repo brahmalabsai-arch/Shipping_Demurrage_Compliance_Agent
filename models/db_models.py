@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import (
     CHAR,
+    CheckConstraint,
     Date,
     DateTime,
     Enum,
@@ -26,7 +27,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
 
 from models.enums import DocType, ShipmentStatus
@@ -124,6 +125,43 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, server_default=func.now()
     )
+
+
+# --------------------------------------------------------------------------- demurrage
+
+
+class PortRate(Base):
+    """A port's demurrage tariff for one container type over one validity period (arch §3.3).
+
+    Periods for the same (port_code, container_type) can never overlap — enforced by a GiST
+    exclusion constraint, so a lookup for any date matches at most one row. ``effective_to`` is
+    inclusive; NULL means open-ended. Revisions start a new period instead of overwriting.
+    """
+
+    __tablename__ = "port_rates"
+    __table_args__ = (
+        CheckConstraint("free_days >= 0 AND daily_rate >= 0", name="non_negative"),
+        CheckConstraint(
+            "effective_to IS NULL OR effective_to >= effective_from", name="valid_period"
+        ),
+        ExcludeConstraint(
+            ("port_code", "="),
+            ("container_type", "="),
+            (text("daterange(effective_from, effective_to, '[]')"), "&&"),
+            using="gist",
+            name="ex_port_rates_no_overlap",
+        ),
+        {"schema": "demurrage"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    port_code: Mapped[str] = mapped_column(Text)
+    container_type: Mapped[str] = mapped_column(Text)
+    currency: Mapped[str] = mapped_column(CHAR(3))
+    free_days: Mapped[int] = mapped_column(Integer)
+    daily_rate: Mapped[Decimal] = mapped_column(Numeric)
+    effective_from: Mapped[date] = mapped_column(Date)
+    effective_to: Mapped[date | None] = mapped_column(Date)
 
 
 # --------------------------------------------------------------------------- audit

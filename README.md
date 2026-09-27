@@ -29,7 +29,7 @@ Copy-Item .env.example .env   # then set POSTGRES_PASSWORD (other empty keys use
 .\.venv\Scripts\python.exe -m scripts.setup_local_db
 
 .\.venv\Scripts\alembic.exe upgrade head
-.\.venv\Scripts\python.exe -m scripts.seed_shipments   # 4 JNPT case-study shipments; safe to re-run
+.\.venv\Scripts\python.exe -m scripts.seed             # all demo data (shipments, port rates); safe to re-run
 ```
 
 ## Dashboards

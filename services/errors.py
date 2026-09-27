@@ -38,3 +38,18 @@ class DocumentNotFoundError(CustomsCopilotError):
 
 class DocumentSupersededError(CustomsCopilotError):
     """Only the latest version of a document can be amended."""
+
+
+# --------------------------------------------------------------------------- demurrage (Phase 2)
+
+
+class PortRateNotFoundError(CustomsCopilotError):
+    """No tariff is configured for this port + container type on the requested date."""
+
+
+class OverlappingRateError(CustomsCopilotError):
+    """An explicit effective_to would overlap the next scheduled tariff period."""
+
+
+class NegativeStayError(CustomsCopilotError):
+    """A demurrage calculation was asked for a negative number of days in port."""

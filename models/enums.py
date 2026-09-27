@@ -21,6 +21,16 @@ class ShipmentStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class ContainerType(StrEnum):
+    """ISO container sizes/types that port tariffs price separately (stored as TEXT)."""
+
+    DRY_20 = "20ft"
+    DRY_40 = "40ft"
+    HIGH_CUBE_40 = "40hc"
+    REEFER_20 = "20rf"
+    REEFER_40 = "40rf"
+
+
 class DocType(StrEnum):
     """Kinds of shipment document that verification compares against each other."""
 
