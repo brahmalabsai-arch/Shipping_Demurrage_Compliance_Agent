@@ -17,6 +17,9 @@ dependencies = [
     "chromadb>=1.5",
     "streamlit>=1.40",
     "tzdata>=2024.1",  # zoneinfo data (Asia/Kolkata) on Windows
+    # <2: langchain-mcp-adapters (agents, Phase 6+) supports the 1.x SDK only.
+    "mcp>=1.24,<2",
+    "structlog>=25.1",
 ]
 
 [project.optional-dependencies]

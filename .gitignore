@@ -21,6 +21,7 @@ htmlcov/
 
 # --- Local data ---
 chroma_data/
+outbox/
 *.log
 
 # --- Editors / OS ---

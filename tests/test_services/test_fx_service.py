@@ -336,6 +336,26 @@ def test_identical_spot_re_entry_is_a_no_op(db_session: Session) -> None:
     assert _actions(db_session, "spot_rate") == ["spot_rate.created"]
 
 
+def test_write_results_are_byte_identical_to_later_reads(db_session: Session) -> None:
+    """Writes return what Postgres stored (NUMERIC(12,6) scale), not the input's own scale —
+    so an MCP write result and a later read serialise identically (Phase 5 parity)."""
+    at = datetime(2026, 10, 6, 8, tzinfo=UTC)
+    spot = _spot(db_session, "88.5", at)
+    locked = _lock(db_session, "88.44", _d(10, 6), LockType.BOL)
+    gazetted = _gazette(db_session, "88.6", _d(10, 1), _d(10, 15))
+
+    assert spot.model_dump_json() == svc.get_spot_rate(db_session, USD, _d(10, 6)).model_dump_json()
+    assert spot.rate.as_tuple().exponent == -6
+    assert (
+        locked.model_dump_json()
+        == svc.get_locked_rate(db_session, USD, LockType.BOL, _d(10, 6)).model_dump_json()
+    )
+    assert (
+        gazetted.model_dump_json()
+        == svc.get_gazetted_rate(db_session, USD, _d(10, 5)).model_dump_json()
+    )
+
+
 # --------------------------------------------------------------------------- locked writes
 
 

@@ -113,11 +113,15 @@ def upsert_spot_rate(session: Session, data: SpotRateUpsert, actor: str) -> Spot
                 payload={"changes": diff},
             )
             session.flush()
+            session.refresh(existing)
         return SpotRateRecord.model_validate(existing)
 
     row = SpotRate(**data.model_dump())
     session.add(row)
     session.flush()
+    # Return what Postgres stored (NUMERIC(12,6) scale: 88.5 -> 88.500000), so a write's result
+    # is byte-identical to any later read of the same row.
+    session.refresh(row)
     record = SpotRateRecord.model_validate(row)
     audit_service.record(
         session,
@@ -183,6 +187,7 @@ def lock_rate(session: Session, data: LockedRateCreate, actor: str) -> LockedRat
             ) from exc
         raise
 
+    session.refresh(row)  # stored NUMERIC(12,6) value, as later reads return it
     record = LockedRateRecord.model_validate(row)
     audit_service.record(
         session,
@@ -280,6 +285,7 @@ def publish_gazetted_rate(
             ) from exc
         raise
 
+    session.refresh(row)  # stored NUMERIC(12,6) value, as later reads return it
     record = GazettedRateRecord.model_validate(row)
     audit_service.record(
         session,

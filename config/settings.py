@@ -7,6 +7,7 @@ through the codebase (conventions §6). Values come from environment variables o
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,6 +41,11 @@ class Settings(BaseSettings):
     gmail_credentials_path: Path = PROJECT_ROOT / "secrets" / "credentials.json"
     gmail_token_path: Path = PROJECT_ROOT / "secrets" / "token.json"
     reviewer_email: str | None = None
+
+    # Outgoing email: 'outbox' writes .eml files locally (default, no network); 'gmail' sends
+    # through the Gmail API (Phase 6).
+    email_backend: Literal["outbox", "gmail"] = "outbox"
+    outbox_path: Path = PROJECT_ROOT / "outbox"
 
     # Regulatory Watch scheduler (Phase 6)
     watch_scan_interval_minutes: int = 15

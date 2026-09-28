@@ -9,6 +9,10 @@ class CustomsCopilotError(Exception):
     """Root of every domain exception, so callers can catch all domain failures in one place."""
 
 
+class DatabaseUnavailableError(CustomsCopilotError):
+    """The database could not be reached or the connection dropped mid-call; safe to retry."""
+
+
 # --------------------------------------------------------------------------- shipping (Phase 1)
 
 
@@ -122,3 +126,10 @@ class InvalidBulletinError(CustomsCopilotError):
 
 class BulletinSnapshotNotFoundError(CustomsCopilotError):
     """No scan has captured a bulletin snapshot yet."""
+
+
+# --------------------------------------------------------------------------- notifications (Phase 5)
+
+
+class EmailDeliveryError(CustomsCopilotError):
+    """The review email could not be sent (backend unavailable, rejected, or not configured)."""

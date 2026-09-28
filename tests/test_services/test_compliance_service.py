@@ -447,3 +447,26 @@ def test_database_allows_one_current_approved_version_per_rule(db_session: Sessi
         row.status, row.decided_by = RuleStatus.APPROVED, "bypass"
         row.decided_at = row.created_at
         db_session.flush()
+
+
+# --------------------------------------------------------------------------- search (interim)
+
+
+def test_search_ranks_approved_rules_by_query_overlap(db_session: Session) -> None:
+    for key, text_, codes in [
+        ("ORG-KR-CEPA", "Korean certificate of origin for preferential duty.", ["8708"]),
+        ("VAL-exchange-rate", "Convert value at the notified exchange rate.", []),
+        ("TYRES", "Certificate of origin for tyres.", ["4011"]),
+    ]:
+        rule = _propose(db_session, text_, rule_key=key, hs_codes=codes)
+        svc.decide(db_session, rule.id, APPROVE, REVIEWER)
+    _propose(db_session, "Korean certificate of origin pending text", rule_key="PENDING-KR")
+
+    matches = svc.search_rules(db_session, "Korean certificate of origin", hs_code="87084000")
+
+    assert [m.rule.rule_key for m in matches] == ["ORG-KR-CEPA"]  # tyres filtered by HS code
+    assert matches[0].score == 1.0 and matches[0].method == "keyword"
+    everything = svc.search_rules(db_session, "certificate of origin")
+    assert "PENDING-KR" not in {m.rule.rule_key for m in everything}  # approved only
+    assert svc.search_rules(db_session, "the of and") == []  # stopwords only
+    assert len(svc.search_rules(db_session, "certificate origin rate", limit=1)) == 1

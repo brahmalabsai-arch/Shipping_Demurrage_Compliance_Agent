@@ -262,3 +262,13 @@ def test_list_ports(db_session: Session) -> None:
     svc.upsert_rate(db_session, _upsert(port_code="INMUN"), ACTOR)
 
     assert svc.list_ports(db_session) == ["INMUN", "INNSA"]
+
+
+def test_charge_for_stay_prices_under_the_tariff_in_force(db_session: Session) -> None:
+    svc.upsert_rate(db_session, _upsert(free_days=5, daily_rate=Decimal("45.00")), ACTOR)
+
+    charge = svc.charge_for_stay(db_session, "INNSA", C.DRY_20, date(2026, 9, 8), 8)
+
+    assert (charge.chargeable_days, charge.amount) == (3, Decimal("135.00"))
+    with pytest.raises(PortRateNotFoundError):
+        svc.charge_for_stay(db_session, "INNSA", C.DRY_20, date(2025, 1, 1), 8)

@@ -14,6 +14,7 @@ A trigger (migration ``0004``) enforces the same lifecycle in Postgres. Rule ver
 edited or deleted: a change is a new version, and history is the chain of ``superseded_by``.
 """
 
+import re
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,7 +22,7 @@ from sqlalchemy.orm import Session
 
 from models.db_models import ChangeLogEntry, ComplianceRule, utcnow
 from models.enums import RuleDecision, RuleStatus
-from models.schemas import ComplianceRuleRecord, RuleProposal
+from models.schemas import ComplianceRuleRecord, RuleMatch, RuleProposal
 from services import audit_service
 from services.errors import (
     ChangeLogEntryNotFoundError,
@@ -81,6 +82,63 @@ def list_rules(
     if status is not None:
         query = query.where(ComplianceRule.status == status)
     return [ComplianceRuleRecord.model_validate(row) for row in session.scalars(query)]
+
+
+_WORD = re.compile(r"[a-z0-9]+")
+_STOPWORDS = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "how",
+        "in",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
+        "what",
+        "when",
+        "which",
+        "with",
+    ]
+)
+
+
+def _terms(text: str) -> set[str]:
+    return {w for w in _WORD.findall(text.lower()) if len(w) > 2 and w not in _STOPWORDS}
+
+
+def search_rules(
+    session: Session, query: str, hs_code: str | None = None, limit: int = 5
+) -> list[RuleMatch]:
+    """Approved rules relevant to ``query`` (optionally only those covering ``hs_code``).
+
+    Interim keyword retriever: score = share of the query's terms found in the rule key and
+    text; rules with no overlap are dropped. Phase 9 replaces the scoring with the hybrid
+    BM25 + dense + rerank retriever behind this same function. Only ever searches
+    ``list_approved`` (``status='approved'`` in SQL) — pending or rejected text is never a
+    candidate.
+    """
+    wanted = _terms(query)
+    if not wanted:
+        return []
+    matches = []
+    for rule in list_approved(session, hs_code):
+        found = wanted & _terms(f"{rule.rule_key.replace('-', ' ')} {rule.content}")
+        if found:
+            matches.append(RuleMatch(rule=rule, score=len(found) / len(wanted), method="keyword"))
+    matches.sort(key=lambda m: (-m.score, m.rule.rule_key))
+    return matches[:limit]
 
 
 def get_current_rule(session: Session, rule_key: str) -> ComplianceRuleRecord:

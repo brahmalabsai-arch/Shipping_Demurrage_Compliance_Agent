@@ -24,6 +24,8 @@ from models.enums import (
     ShipmentStatus,
 )
 
+# Deliberately loose (shape only): the mail backend is the authority on deliverability.
+EmailAddress = Annotated[str, Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")]
 # ISO 4217 *shape* only. Whether a code is a real currency (e.g. 'XYZ' is not) is the document
 # verification agent's call — it must flag it rather than have it rejected here (edge cases, Ph 7).
 CurrencyCode = Annotated[str, Field(pattern=r"^[A-Z]{3}$")]
@@ -482,3 +484,33 @@ class SectionChange(BaseModel):
     before: BulletinSection | None
     after: BulletinSection | None
     is_substantive: bool
+
+
+class RuleMatch(BaseModel):
+    """An approved rule returned by ``compliance_service.search_rules``, with its relevance.
+
+    ``method`` records which retriever produced the score (``keyword`` until the Phase 9
+    hybrid retriever replaces it), so results stay interpretable across the switch.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    rule: ComplianceRuleRecord
+    score: float
+    method: str
+
+
+# --------------------------------------------------------------------------- notifications
+
+
+class EmailReceipt(BaseModel):
+    """Proof that a review email was handed to the mail backend."""
+
+    model_config = ConfigDict(frozen=True)
+
+    message_id: str
+    backend: str
+    to: str
+    subject: str
+    rule_id: UUID
+    sent_at: datetime

@@ -158,6 +158,13 @@ def upsert_rate(session: Session, data: PortRateUpsert, actor: str) -> PortRateR
     return record
 
 
+def charge_for_stay(
+    session: Session, port_code: str, container_type: str, as_of: date, days_in_port: int
+) -> DemurrageCharge:
+    """Price a stay under the tariff in force on ``as_of`` (``get_rate`` + ``demurrage_charge``)."""
+    return demurrage_charge(get_rate(session, port_code, container_type, as_of), days_in_port)
+
+
 def demurrage_charge(rate: PortRateRecord, days_in_port: int) -> DemurrageCharge:
     """Charge for ``days_in_port`` days under ``rate``, in the tariff's own currency.
 

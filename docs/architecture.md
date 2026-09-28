@@ -15,7 +15,7 @@
 | Embeddings / retrieval | BGE embeddings + BM25 + Reciprocal Rank Fusion + cross-encoder reranking | Reuses the exact retrieval pipeline already mastered (PolicyMind-equivalent) |
 | ORM / migrations | SQLAlchemy 2.0 + Alembic | Type-safe models, versioned schema changes across 13 phases |
 | Data validation | Pydantic v2 | Shared schema layer between service functions, MCP tool I/O, and FastAPI |
-| MCP servers | Official `mcp` Python SDK | Standards-compliant; each server run as its own stdio/SSE process |
+| MCP servers | Official `mcp` Python SDK, **1.x** (`FastMCP`; pinned `<2` because `langchain-mcp-adapters` supports 1.x only) | Standards-compliant; each server run as its own stdio process (`python -m mcp_servers.<name>.server`) |
 | MCP↔LangGraph bridge | `langchain-mcp-adapters` | Exposes MCP tools as LangChain-compatible tools inside each agent node |
 | Scheduler | APScheduler (`AsyncIOScheduler`), embedded in the FastAPI app | Drives the Regulatory Watch Agent's periodic scan; no separate infra (Celery/Redis) needed at this scale |
 | Email | Gmail API v1 (`google-api-python-client`) + OAuth 2.0 (`google-auth-oauthlib`) | Real send, as decided — see §7 |
@@ -247,33 +247,69 @@ Service functions take the caller's SQLAlchemy `Session` and only flush; the cal
 
 ## 5. MCP layer — servers and tool contracts
 
-Each server is a thin `mcp.server.Server` instance whose tool handlers call straight into the matching service module. Tool schemas below (Pydantic-typed, illustrative signatures):
+Each server (`mcp_servers/<name>/server.py`) is a `FastMCP` instance whose tools are one-line
+calls into the matching service module, through `mcp_servers/common.py::run_tool`, which:
 
-**`shipping_records_mcp`**
-- `get_shipment(shipment_id: str) -> ShipmentRecord`
-- `list_shipments(status: str | None) -> list[ShipmentRecord]`
-- `get_documents(shipment_id: str) -> list[DocumentRecord]`
-- `update_status(shipment_id: str, status: str) -> ShipmentRecord`
+- reads the caller from the request's `_meta`: `actor` (the audit-trail actor for writes;
+  default `mcp:<server>`) and `run_id` (correlates an agent run's calls);
+- runs the service call in its own `session_scope()` transaction on a worker thread;
+- logs one structlog `mcp.tool_call` event per call (tool, arguments, result or error,
+  duration, actor, run_id) — JSON to stderr, since stdout carries the stdio protocol;
+- returns domain failures as tool errors whose text contains `"<ErrorType>: message"`, a lost
+  database as `DatabaseUnavailableError` (the server keeps serving), anything else as
+  `UnexpectedError` without internals.
 
-**`demurrage_rates_mcp`**
-- `get_rate(port_code: str, container_type: str, as_of: date) -> PortRate`
+Arguments are validated by FastMCP against the typed signature before any service runs. Every
+tool declares its return type, so results travel as **structured content** (a model as its
+JSON object; lists / optional values as `{"result": ...}`) — the Phase 5 parity tests compare
+that payload byte-for-byte (canonical JSON) with the direct service call. Tool names are
+verb-first (`get_ list_ create_ update_ propose_ decide send_ resolve_`, plus the contract's
+`search_` and `diff_`) and unique across servers, because agents load several servers at once.
+Dates are `as_of` everywhere (the contract's `resolve_rate(pair, date, stage)` is
+`resolve_rate(pair, as_of, stage, ...)`). Each server mirrors its dashboard's operations
+(FR8: every domain readable *and* writable through both).
 
-**`fx_rates_mcp`**
-- `resolve_rate(pair: str, date: date, stage: Literal["quotation","bol","invoice","port_charges"]) -> ResolvedRate` — implements the four-rule engine (§8)
-- `get_spot_rate(pair: str, as_of: date) -> SpotRate`
+**`shipping_records_mcp`** — `list_shipments(status?)`, `get_shipment(shipment_id)`,
+`get_shipment_by_container(container_id)`, `get_active_shipment(shipment_id)` (fails with
+`ShipmentCancelledError` — agents use this), `get_documents(shipment_id, include_superseded?)`,
+`create_shipment(shipment: ShipmentCreate)`, `update_shipment(shipment_id, changes:
+ShipmentUpdate)`, `update_status(shipment_id, status)`, `create_document(shipment_id, document:
+DocumentCreate)`, `update_document(document_id, changes: DocumentAmend)` (re-issues a new
+version).
 
-**`compliance_rulebook_mcp`**
-- `search_rules(query: str, hs_code: str | None) -> list[RuleChunk]` (calls the RAG retriever, approved rules only — enforced at the SQL layer with `WHERE status='approved'`, not just at the prompt layer)
-- `list_pending() -> list[Rule]`
-- `propose_change(rule_key: str, content: str, hs_codes: list[str], effective_date: date, change_summary: str | None, source_diff_id: str | None) -> Rule` (status forced to `pending`; `rule_key`/`effective_date` added in Phase 4 — a version needs its rule)
-- `decide(rule_id: str, decision: Literal["approve","reject"], reviewer: str) -> Rule` (only path to `approved`)
+**`demurrage_rates_mcp`** — `get_rate(port_code, container_type, as_of) -> PortRateRecord`,
+`get_demurrage_charge(port_code, container_type, as_of, days_in_port) -> DemurrageCharge`,
+`list_rates(port_code?)`, `list_ports()`, `update_rate(rate: PortRateUpsert)` (add a period or
+correct the one starting that day).
 
-**`customs_bulletin_mcp`**
-- `get_current_snapshot() -> BulletinSnapshot`
-- `diff_since_last_scan() -> ChangeLogEntry | None`
+**`fx_rates_mcp`** — `resolve_rate(pair, as_of, stage, quote_validity_days?, invoice_kind?,
+bol_date?) -> ResolvedRate` (the four-rule engine, §8), `get_spot_rate(pair, as_of)`,
+`get_locked_rate(pair, lock_type, lock_date)`, `get_gazetted_rate(pair, as_of)`,
+`list_pairs()`, `list_spot_rates(pair?)`, `list_locked_rates(pair?)`,
+`list_gazetted_rates(pair?)`, `update_spot_rate(rate)`, `create_locked_rate(rate)`,
+`create_gazetted_rate(rate)` (with `revision_of` = a correction).
 
-**`notifications_mcp`**
-- `send_review_email(to: str, subject: str, diff_summary: str, rule_id: str) -> EmailReceipt`
+**`compliance_rulebook_mcp`** — `search_rules(query, hs_code?, limit=5) -> list[RuleMatch]`
+(approved rules only, via `list_approved`'s `WHERE status='approved'`; an interim keyword
+scorer until the Phase 9 hybrid retriever replaces it behind the same service function),
+`list_approved(hs_code?)`, `list_pending()`, `list_rules(rule_key?, status?)`,
+`get_rule(rule_id)`, `get_current_rule(rule_key)`, `propose_change(proposal: RuleProposal)`
+(rule_key, content, hs_codes, effective_date, change_summary?, source_diff_id? — status forced
+to `pending`; there is no status field), `decide(rule_id, decision: "approve"|"reject",
+reviewer)` (only path to `approved`; a named reviewer is required).
+
+**`customs_bulletin_mcp`** — `get_current_snapshot()` (latest *scan*),
+`diff_since_last_scan() -> ChangeLogEntryRecord | None` (idempotent),
+`get_section_changes(change_id) -> list[SectionChange]`, `get_change(change_id)`,
+`list_changes()`, `list_snapshots(limit?)`; publisher side for operators (not given to the
+watch agent): `get_publication()`, `update_publication(content)`. Capturing a snapshot is
+deliberately not a tool — only the scheduler captures (Option A).
+
+**`notifications_mcp`** — `send_review_email(to, subject, diff_summary, rule_id) ->
+EmailReceipt`, via `services/notification_service.py` and the sender chosen by
+`EMAIL_BACKEND`: `outbox` (default; `.eml` files in the git-ignored `OUTBOX_PATH`) or `gmail`
+(Phase 6, `integrations/gmail_client.py`). A backend failure is `EmailDeliveryError` and is not
+audited as sent.
 
 ## 6. Agent layer — LangGraph design
 
