@@ -39,3 +39,35 @@ class DocType(StrEnum):
     BILL_OF_LADING = "bill_of_lading"
     CERTIFICATE = "certificate"
     OTHER = "other"
+
+
+class FxStage(StrEnum):
+    """Shipment lifecycle stage an FX rate is asked for; each has its own rule (arch §8)."""
+
+    QUOTATION = "quotation"
+    BOL = "bol"
+    INVOICE = "invoice"
+    PORT_CHARGES = "port_charges"
+
+
+class LockType(StrEnum):
+    """Event that locks a historical FX rate (``fx.locked_rates.lock_type``)."""
+
+    BOL = "bol"
+    COMMERCIAL_INVOICE = "commercial_invoice"
+
+
+class InvoiceKind(StrEnum):
+    """Invoice-stage variants: a commercial invoice locks to its own date, a freight invoice
+    re-uses the rate locked on the bill of lading date."""
+
+    COMMERCIAL = "commercial"
+    FREIGHT = "freight"
+
+
+class RateSource(StrEnum):
+    """Which ``fx.*`` table a resolved rate came from."""
+
+    SPOT = "spot"
+    LOCKED = "locked"
+    GAZETTED = "gazetted"

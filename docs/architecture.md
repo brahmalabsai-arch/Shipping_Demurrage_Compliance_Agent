@@ -149,10 +149,11 @@ effective_to    DATE NULL        -- inclusive; NULL = open-ended
 ### 3.4 `fx.spot_rates` (quotation stage)
 ```
 id           UUID PK
-pair         TEXT      -- e.g. 'USD/INR'
+pair         TEXT      -- 'BASE/QUOTE', e.g. 'USD/INR' = INR per 1 USD
 rate         NUMERIC(12,6)
 as_of        TIMESTAMPTZ
-source       TEXT      -- e.g. 'simulated-bloomberg'
+source       TEXT      -- e.g. 'simulated-spot-feed'
+-- UNIQUE (pair, as_of); CHECK rate > 0. Same (pair, as_of) re-entered = audited in-place correction.
 ```
 
 ### 3.5 `fx.locked_rates` (BoL / invoice stage — historical, immutable once written)
@@ -162,6 +163,8 @@ pair         TEXT
 rate         NUMERIC(12,6)
 lock_date    DATE       -- the BoL "on board" date or invoice generation date
 lock_type    ENUM('bol','commercial_invoice')
+-- UNIQUE (pair, lock_type, lock_date); CHECK rate > 0.
+-- Trigger fx.reject_mutation() rejects every UPDATE/DELETE (immutability enforced in Postgres).
 ```
 
 ### 3.6 `fx.gazetted_rates` (port charges / customs stage)
@@ -170,9 +173,15 @@ id              UUID PK
 pair            TEXT
 rate            NUMERIC(12,6)
 period_start    DATE
-period_end      DATE
+period_end      DATE        -- inclusive
 publishing_authority TEXT   -- simulated customs/central-bank name
 revision_of     UUID NULL FK -> gazetted_rates.id   -- handles mid-period corrections
+-- Append-only (same trigger as locked_rates): a wrong rate is corrected by a revision row.
+-- EXCLUDE gist (pair =, daterange &&) WHERE revision_of IS NULL      → originals never overlap.
+-- EXCLUDE gist (revision_of =, daterange &&) WHERE revision_of IS NOT NULL
+--                                           → revisions of one row never overlap each other.
+-- A revision is for the same pair and lies within the revised row's period (service check);
+-- it may cover the whole period or only part of it, and may itself be revised.
 ```
 
 ### 3.7 `compliance.rules`
@@ -266,28 +275,29 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
 Pseudocode for the four-rule logic, all in MVP scope:
 
 ```
-def resolve_rate(pair, date, stage):
+def resolve_rate(session, pair, as_of, stage, *, quote_validity_days=None,
+                 invoice_kind=None, bol_date=None):
     if stage == "quotation":
-        rate = latest spot_rates row for pair with as_of <= date
-        expiry = date + quote_validity_days (7-14, caller-supplied)
+        rate = latest spot_rates row for pair with as_of before the end of that IST calendar day
+        expiry = as_of + quote_validity_days (7-14, caller-supplied)
         return ResolvedRate(rate, source="spot", locked=False, expires=expiry)
 
     if stage == "bol":
-        rate = locked_rates row where pair=pair, lock_type='bol', lock_date=date
+        rate = locked_rates row where pair=pair, lock_type='bol', lock_date=as_of
         if not found: raise RateNotFoundError  # no silent fallback
 
     if stage == "invoice":
-        # commercial invoice: lock to its own invoice_date
-        rate = locked_rates row where lock_type='commercial_invoice', lock_date=date
-        # freight invoice re-uses the BoL-date rate instead — caller passes bol_date
+        # invoice_kind='commercial': lock to its own invoice date
+        rate = locked_rates row where lock_type='commercial_invoice', lock_date=as_of
+        # invoice_kind='freight': re-use the BoL-date rate — caller passes bol_date
+        rate = locked_rates row where lock_type='bol', lock_date=bol_date
 
     if stage == "port_charges":
-        rate = gazetted_rates row where pair=pair
-               and period_start <= date <= period_end
-        if a revision_of row exists for the same period: prefer the revision
+        rate = gazetted original where pair=pair and period_start <= as_of <= period_end,
+               then descend to the deepest revision_of row whose period also contains as_of
 ```
 
-Every branch raises a typed exception (`RateNotFoundError`) rather than defaulting — enforced by the edge-case tests in `spec_edge_cases.md`.
+Every branch raises a typed exception (`RateNotFoundError`) rather than defaulting — enforced by the edge-case tests in `spec_edge_cases.md`. Stage context is strict: missing context (validity days for a quotation, `invoice_kind`, `bol_date` for a freight invoice) or context the stage does not use raises `InvalidRateRequestError`. `ResolvedRate` carries `source_id` (the `fx.*` row used) and a human-readable `basis`, so every conversion is traceable. A quote is valid *through* `expires`; callers (dashboard, document verification agent) surface "quote expired" via `fx_service.is_quote_expired(resolved, on)`.
 
 ## 9. Dashboards
 

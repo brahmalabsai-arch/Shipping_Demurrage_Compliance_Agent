@@ -12,7 +12,15 @@ from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
-from models.enums import ContainerType, DocType, ShipmentStatus
+from models.enums import (
+    ContainerType,
+    DocType,
+    FxStage,
+    InvoiceKind,
+    LockType,
+    RateSource,
+    ShipmentStatus,
+)
 
 # ISO 4217 *shape* only. Whether a code is a real currency (e.g. 'XYZ' is not) is the document
 # verification agent's call — it must flag it rather than have it rejected here (edge cases, Ph 7).
@@ -25,10 +33,20 @@ HsCode = Annotated[str, Field(pattern=r"^\d{4}(\d{2}){0,3}$")]
 PortCode = Annotated[str, Field(pattern=r"^[A-Z]{2}[A-Z2-9]{3}$")]
 NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
 QuoteValidityDays = Annotated[int, Field(ge=7, le=14)]
+# 'BASE/QUOTE', e.g. 'USD/INR': 1 USD = <rate> INR.
+CurrencyPair = Annotated[str, Field(pattern=r"^[A-Z]{3}/[A-Z]{3}$")]
+# Matches the NUMERIC(12,6) columns, so a value that would be rounded by Postgres is rejected.
+FxRateValue = Annotated[Decimal, Field(gt=0, max_digits=12, decimal_places=6)]
 
 
 class _Input(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+
+def _check_distinct_currencies(pair: str) -> None:
+    base, quote = pair.split("/")
+    if base == quote:
+        raise ValueError(f"pair {pair} converts a currency into itself")
 
 
 def _check_quote_pair(quote_date: date | None, validity: int | None) -> None:
@@ -232,3 +250,113 @@ class DemurrageCharge(BaseModel):
     chargeable_days: int
     amount: Decimal
     currency: str
+
+
+# --------------------------------------------------------------------------- fx
+
+
+class SpotRateUpsert(_Input):
+    """A spot observation to add, or to correct if one exists for the same pair and instant."""
+
+    pair: CurrencyPair
+    rate: FxRateValue
+    as_of: AwareDatetime
+    source: Annotated[str, Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _distinct(self) -> Self:
+        _check_distinct_currencies(self.pair)
+        return self
+
+
+class SpotRateRecord(BaseModel):
+    """A spot observation as returned across the service boundary."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    pair: str
+    rate: Decimal
+    as_of: datetime
+    source: str
+
+
+class LockedRateCreate(_Input):
+    """A rate to lock on a bill-of-lading or commercial-invoice date. Cannot be changed later."""
+
+    pair: CurrencyPair
+    rate: FxRateValue
+    lock_date: date
+    lock_type: LockType
+
+    @model_validator(mode="after")
+    def _distinct(self) -> Self:
+        _check_distinct_currencies(self.pair)
+        return self
+
+
+class LockedRateRecord(BaseModel):
+    """A locked rate as returned across the service boundary."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    pair: str
+    rate: Decimal
+    lock_date: date
+    lock_type: LockType
+
+
+class GazettedRateCreate(_Input):
+    """A gazetted notification for a period (inclusive), or — with ``revision_of`` — a correction
+    of an existing row covering all or part of that row's period."""
+
+    pair: CurrencyPair
+    rate: FxRateValue
+    period_start: date
+    period_end: date
+    publishing_authority: Annotated[str, Field(min_length=1)]
+    revision_of: UUID | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        _check_distinct_currencies(self.pair)
+        if self.period_end < self.period_start:
+            raise ValueError("period_end cannot be before period_start")
+        return self
+
+
+class GazettedRateRecord(BaseModel):
+    """A gazetted rate row as returned across the service boundary."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    pair: str
+    rate: Decimal
+    period_start: date
+    period_end: date
+    publishing_authority: str
+    revision_of: UUID | None
+
+
+class ResolvedRate(BaseModel):
+    """The FX rate that applies to one (pair, date, stage), and exactly where it came from.
+
+    ``source_id`` is the ``fx.*`` row used, so an agent's conversion can be traced back to the
+    data it was built from. ``locked`` is True only for rates from ``fx.locked_rates`` (which can
+    never change). ``expires`` is set for quotations only: the quote is valid through that day.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    pair: str
+    stage: FxStage
+    as_of: date
+    rate: Decimal
+    source: RateSource
+    source_id: UUID
+    basis: str
+    locked: bool
+    expires: date | None = None
+    invoice_kind: InvoiceKind | None = None

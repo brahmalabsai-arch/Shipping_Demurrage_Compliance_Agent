@@ -30,7 +30,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
 
-from models.enums import DocType, ShipmentStatus
+from models.enums import DocType, LockType, ShipmentStatus
 
 # Deterministic constraint names so Alembic autogenerate produces stable, reviewable migrations.
 NAMING_CONVENTION = {
@@ -162,6 +162,95 @@ class PortRate(Base):
     daily_rate: Mapped[Decimal] = mapped_column(Numeric)
     effective_from: Mapped[date] = mapped_column(Date)
     effective_to: Mapped[date | None] = mapped_column(Date)
+
+
+# --------------------------------------------------------------------------- fx
+
+# Rates are "1 unit of the base currency = rate units of the quote currency" for pair 'BASE/QUOTE'.
+FX_RATE = Numeric(12, 6)
+
+
+class SpotRate(Base):
+    """A market spot observation, used only to price quotations (architecture §3.4).
+
+    One observation per (pair, as_of); correcting a mistyped observation edits it in place.
+    """
+
+    __tablename__ = "spot_rates"
+    __table_args__ = (
+        UniqueConstraint("pair", "as_of", name="uq_spot_rates_pair_as_of"),
+        CheckConstraint("rate > 0", name="positive_rate"),
+        {"schema": "fx"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    pair: Mapped[str] = mapped_column(Text)
+    rate: Mapped[Decimal] = mapped_column(FX_RATE)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(Text)
+
+
+class LockedRate(Base):
+    """A rate locked on a bill-of-lading or commercial-invoice date (architecture §3.5).
+
+    Immutable once written: at most one row per (pair, lock_type, lock_date), and a trigger
+    created in migration ``0003`` rejects any UPDATE or DELETE, even bypassing the service.
+    """
+
+    __tablename__ = "locked_rates"
+    __table_args__ = (
+        UniqueConstraint(
+            "pair", "lock_type", "lock_date", name="uq_locked_rates_pair_lock_type_lock_date"
+        ),
+        CheckConstraint("rate > 0", name="positive_rate"),
+        {"schema": "fx"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    pair: Mapped[str] = mapped_column(Text)
+    rate: Mapped[Decimal] = mapped_column(FX_RATE)
+    lock_date: Mapped[date] = mapped_column(Date)
+    lock_type: Mapped[LockType] = mapped_column(_pg_enum(LockType, "lock_type", "fx"))
+
+
+class GazettedRate(Base):
+    """A customs-notified rate for a fixed period, used for port charges (architecture §3.6).
+
+    Original notifications (``revision_of`` NULL) for one pair never overlap. A mid-period
+    correction is a new row whose ``revision_of`` points at the row it corrects and whose period
+    lies within that row's period; revisions of the same row never overlap each other, so the
+    deepest revision covering a date is unambiguous. Rows are append-only — the same trigger as
+    ``locked_rates`` rejects UPDATE and DELETE.
+    """
+
+    __tablename__ = "gazetted_rates"
+    __table_args__ = (
+        CheckConstraint("rate > 0", name="positive_rate"),
+        CheckConstraint("period_end >= period_start", name="valid_period"),
+        ExcludeConstraint(
+            ("pair", "="),
+            (text("daterange(period_start, period_end, '[]')"), "&&"),
+            using="gist",
+            where=text("revision_of IS NULL"),
+            name="ex_gazetted_rates_no_overlap",
+        ),
+        ExcludeConstraint(
+            ("revision_of", "="),
+            (text("daterange(period_start, period_end, '[]')"), "&&"),
+            using="gist",
+            where=text("revision_of IS NOT NULL"),
+            name="ex_gazetted_rates_revision_no_overlap",
+        ),
+        {"schema": "fx"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    pair: Mapped[str] = mapped_column(Text)
+    rate: Mapped[Decimal] = mapped_column(FX_RATE)
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    publishing_authority: Mapped[str] = mapped_column(Text)
+    revision_of: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("fx.gazetted_rates.id"))
 
 
 # --------------------------------------------------------------------------- audit

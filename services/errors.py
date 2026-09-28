@@ -53,3 +53,30 @@ class OverlappingRateError(CustomsCopilotError):
 
 class NegativeStayError(CustomsCopilotError):
     """A demurrage calculation was asked for a negative number of days in port."""
+
+
+# --------------------------------------------------------------------------- fx (Phase 3)
+
+
+class RateNotFoundError(CustomsCopilotError):
+    """No FX rate satisfies the stage's rule for this pair and date (never a nearest-date guess)."""
+
+
+class InvalidRateRequestError(CustomsCopilotError):
+    """The stage's required context is missing, or context the stage does not use was given."""
+
+
+class RateAlreadyLockedError(CustomsCopilotError):
+    """A rate is already locked for this pair, lock type and date; locked rates are immutable."""
+
+
+class GazettedRateNotFoundError(CustomsCopilotError):
+    """No gazetted rate exists with the given id (e.g. the row a revision claims to revise)."""
+
+
+class OverlappingGazettedPeriodError(CustomsCopilotError):
+    """The period overlaps another original notification, or a sibling revision of the same row."""
+
+
+class InvalidGazettedRevisionError(CustomsCopilotError):
+    """A revision must be for the same pair and lie within the period of the row it revises."""

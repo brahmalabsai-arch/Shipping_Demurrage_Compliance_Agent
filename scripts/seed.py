@@ -3,7 +3,7 @@
 .venv\\Scripts\\python.exe -m scripts.seed
 """
 
-from scripts import seed_port_rates, seed_shipments
+from scripts import seed_fx_rates, seed_port_rates, seed_shipments
 
 
 def main() -> None:
@@ -11,6 +11,8 @@ def main() -> None:
     seed_shipments.main()
     print("== demurrage port rates")
     seed_port_rates.main()
+    print("== fx rates")
+    seed_fx_rates.main()
 
 
 if __name__ == "__main__":
