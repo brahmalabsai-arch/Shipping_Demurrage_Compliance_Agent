@@ -5,8 +5,7 @@ Backends, chosen by ``Settings.email_backend``:
 
 * ``outbox`` (default) — writes each message as an RFC 822 ``.eml`` file under
   ``Settings.outbox_path`` (git-ignored). No network; open the files in any mail client.
-* ``gmail`` — the real Gmail API sender with OAuth, wired in Phase 6
-  (``integrations/gmail_client.py``).
+* ``gmail`` — the real Gmail API sender with OAuth (``integrations/gmail_client.py``).
 """
 
 from datetime import UTC, datetime
@@ -60,4 +59,6 @@ def get_email_sender() -> EmailSender:
     settings = get_settings()
     if settings.email_backend == "outbox":
         return OutboxSender(settings.outbox_path)
-    raise EmailDeliveryError("the gmail backend is wired in Phase 6; use EMAIL_BACKEND=outbox")
+    from integrations.gmail_client import GmailSender  # Google libraries only when needed
+
+    return GmailSender(settings.gmail_credentials_path, settings.gmail_token_path)

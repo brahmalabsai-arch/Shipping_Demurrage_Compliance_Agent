@@ -50,7 +50,8 @@ async def test_send_review_email_writes_the_message_and_audits_it(
     assert message["Message-ID"] == receipt["message_id"]
     assert (message["To"], message["Subject"]) == (REVIEWER, "Review ORG-KR-CEPA")
     body = message.get_payload(decode=True).decode()  # type: ignore[union-attr]
-    expected = notification_service.compose_review_body(rule, arguments["diff_summary"])
+    context = direct(lambda s: compliance_service.review_context(s, rule.id))
+    expected = notification_service.compose_review_body(context, arguments["diff_summary"])
     assert body.replace("\r\n", "\n").strip() == expected.strip()  # same body the service composes
     event = direct(lambda s: s.scalars(
         select(AuditEvent).where(AuditEvent.action == "notification.review_email_sent")).one())  # fmt: skip

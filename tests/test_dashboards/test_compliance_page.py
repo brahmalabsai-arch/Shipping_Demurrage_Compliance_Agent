@@ -47,7 +47,7 @@ def test_approve_click_with_reviewer_puts_the_new_version_in_force(
 ) -> None:
     proposal = _pending_v2(session_factory)
     at = _open_page(reviewer="a.sharma")
-    assert "BCD raised to 20%" in [c.value for c in at.caption]
+    assert any("BCD raised to 20%" in c.value for c in at.caption)
     assert any("+20% of the assessable" in c.value for c in at.code)  # diff vs v1 shown
 
     at.button(key=f"approve_{proposal.id}").click()
@@ -82,6 +82,7 @@ def test_reject_click_is_final(session_factory: sessionmaker[Session]) -> None:
     proposal = _pending_v2(session_factory)
     at = _open_page(reviewer="a.sharma")
 
+    at.text_input(key=f"note_{proposal.id}").set_value("awaiting the official notification")
     at.button(key=f"reject_{proposal.id}").click()
     at.run()
 
@@ -141,3 +142,43 @@ def test_rulebook_filters_by_hs_code(session_factory: sessionmaker[Session]) -> 
     rules = set(at.dataframe[0].value["Rule"])
     assert "HSN-870830-brake-certification" not in rules
     assert {"HSN-8708-duty", "ORG-KR-CEPA", "DOC-quantity-consistency"} <= rules
+
+
+def test_reject_without_a_reason_is_refused(session_factory: sessionmaker[Session]) -> None:
+    proposal = _pending_v2(session_factory)
+    at = _open_page(reviewer="a.sharma")
+
+    at.button(key=f"reject_{proposal.id}").click()
+    at.run()
+
+    assert at.error[0].value.startswith("InvalidDecisionError: a rejection must give a reason")
+    with session_factory() as session:
+        assert svc.get_rule(session, proposal.id).status is RuleStatus.PENDING
+
+
+def test_card_compares_with_the_rule_in_force_and_shows_history(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """v2 (20%) rejected with a reason, v3 (25%) pending: the v3 card diffs against v1 (15%)
+    and says why v2 was rejected; the reason shows in All versions too."""
+    v2 = _pending_v2(session_factory)
+    with session_factory() as session, session.begin():
+        svc.decide(session, v2.id, "reject", "a.sharma", "awaiting official notification")
+        current = svc.get_current_rule(session, KEY)
+        v3 = svc.propose_change(
+            session,
+            RuleProposal(rule_key=KEY, content=current.content.replace("15%", "25%"),
+                         hs_codes=current.hs_codes, effective_date=date(2026, 10, 1)),
+            "regulatory_watch_agent",
+        )  # fmt: skip
+
+    at = _open_page(reviewer="a.sharma")
+
+    assert v3.version == 3
+    assert any("v2 (proposed " in w.value and "awaiting official notification" in w.value
+               for w in at.warning)  # fmt: skip
+    [diff] = [c.value for c in at.code if "(in force)" in c.value]
+    assert "--- v1 (in force)" in diff and "+++ v3 (proposed)" in diff
+    assert "-15% of the assessable" in diff and "+25% of the assessable" in diff
+    history = at.dataframe[1].value  # [0] rulebook in force, [1] all versions
+    assert "awaiting official notification" in set(history["Reason"])

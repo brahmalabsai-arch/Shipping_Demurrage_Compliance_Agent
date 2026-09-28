@@ -33,7 +33,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from models.db_models import BulletinPublication, BulletinSnapshot, ChangeLogEntry
+from models.db_models import BulletinPublication, BulletinSnapshot, ChangeLogEntry, utcnow
 from models.enums import SectionChangeKind
 from models.schemas import (
     BulletinPublicationRecord,
@@ -195,12 +195,12 @@ def _assess(old: str, new: str) -> tuple[bool, str, list[SectionChange]]:
     return substantive, "\n".join(lines), changes
 
 
-def unified_diff(old: str, new: str) -> str:
+def unified_diff(
+    old: str, new: str, old_label: str = "previous scan", new_label: str = "latest scan"
+) -> str:
     """A line diff for display (dashboard, review email)."""
     return "\n".join(
-        difflib.unified_diff(
-            old.splitlines(), new.splitlines(), "previous scan", "latest scan", lineterm=""
-        )
+        difflib.unified_diff(old.splitlines(), new.splitlines(), old_label, new_label, lineterm="")
     )
 
 
@@ -289,6 +289,11 @@ def get_latest_snapshot(session: Session) -> BulletinSnapshotRecord:
     return snapshots[0]
 
 
+def get_latest_sections(session: Session) -> list[BulletinSection]:
+    """The rule sections of the latest scan-time snapshot (what the system currently sees)."""
+    return parse_sections(get_latest_snapshot(session).content)
+
+
 def list_snapshots(session: Session, limit: int | None = None) -> list[BulletinSnapshotRecord]:
     """Snapshots, newest first."""
     query = select(BulletinSnapshot).order_by(BulletinSnapshot.seq.desc()).limit(limit)
@@ -363,6 +368,27 @@ def list_changes(session: Session) -> list[ChangeLogEntryRecord]:
     """Every detected change, newest first."""
     query = select(ChangeLogEntry).order_by(ChangeLogEntry.detected_at.desc())
     return [ChangeLogEntryRecord.model_validate(row) for row in session.scalars(query)]
+
+
+def mark_emailed(session: Session, change_id: UUID, actor: str) -> ChangeLogEntryRecord:
+    """Record that a reviewer was emailed about this change. Only the first email counts:
+    later calls leave ``emailed_at`` unchanged (the database allows setting it once)."""
+    row = session.get(ChangeLogEntry, change_id, with_for_update=True)
+    if row is None:
+        raise ChangeLogEntryNotFoundError(f"no bulletin change with id {change_id}")
+    if row.emailed_at is None:
+        row.emailed_at = utcnow()
+        session.flush()
+        audit_service.record(
+            session,
+            actor=actor,
+            action="bulletin_change.emailed",
+            entity_type="bulletin_change",
+            entity_id=row.id,
+            payload={"emailed_at": row.emailed_at},
+        )
+        session.flush()
+    return ChangeLogEntryRecord.model_validate(row)
 
 
 def change_texts(session: Session, change_id: UUID) -> tuple[str, str]:

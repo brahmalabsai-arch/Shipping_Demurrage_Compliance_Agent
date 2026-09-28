@@ -412,6 +412,7 @@ class ComplianceRuleRecord(BaseModel):
     created_at: datetime
     decided_by: str | None
     decided_at: datetime | None
+    decision_note: str | None
 
     def applies_to(self, hs_code: str) -> bool:
         """True if the rule covers ``hs_code`` — a heading covers its sub-headings and vice
@@ -514,3 +515,36 @@ class EmailReceipt(BaseModel):
     subject: str
     rule_id: UUID
     sent_at: datetime
+
+
+# --------------------------------------------------------------------------- review context
+
+
+class RuleDrift(BaseModel):
+    """A rule section of the latest scanned bulletin that differs (beyond whitespace/case) from
+    the approved rule in force — or has no approved rule yet (``in_force`` None).
+
+    ``pending_same`` / ``rejected_same`` are existing versions with that very text: the watch
+    agent proposes only when both are None, so a pending change is not duplicated and a
+    rejected one is never raised again.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    rule_key: str
+    section: BulletinSection
+    in_force: ComplianceRuleRecord | None
+    pending_same: ComplianceRuleRecord | None = None
+    rejected_same: ComplianceRuleRecord | None = None
+
+
+class ReviewContext(BaseModel):
+    """What a reviewer needs to decide on ``proposal``: the rule it would replace and what
+    happened in between (other proposals since that version — pending, or rejected and why)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    proposal: ComplianceRuleRecord
+    in_force: ComplianceRuleRecord | None
+    others: list[ComplianceRuleRecord]
+    history: list[str]

@@ -54,12 +54,17 @@ def _pending_rule(session: Session) -> ComplianceRuleRecord:
 def test_review_body_carries_the_rule_and_the_change(db_session: Session) -> None:
     rule = _pending_rule(db_session)
 
-    body = svc.compose_review_body(rule, "Substantive change.\n- HSN-8708-duty: modified")
+    context = compliance_service.review_context(db_session, rule.id)
 
-    for expected in ("HSN-8708-duty v2 (pending)", "Effective: 2026-10-01", "HS codes: 8708",
-                     "- HSN-8708-duty: modified", "BCD 20%.", "Compliance dashboard",
+    body = svc.compose_review_body(context, "BCD would rise from 15% to 20%.")
+
+    for expected in ("HSN-8708-duty v2 (pending; effective 2026-10-01, HS codes 8708)",
+                     "Compared with the rule in force, v1 (effective 2026-04-01, HS codes 8708):",
+                     "BCD would rise from 15% to 20%.", "Proposed text (v2):\nBCD 20%.",
+                     "Text in force (v1):\nBCD 15%.", "a rejection needs\na reason",
                      str(rule.id)):  # fmt: skip
         assert expected in body
+    assert "History since" not in body  # nothing in between
 
 
 def test_send_returns_a_receipt_and_audits_it(db_session: Session) -> None:
@@ -74,7 +79,9 @@ def test_send_returns_a_receipt_and_audits_it(db_session: Session) -> None:
     assert (receipt.message_id, receipt.backend, receipt.rule_id) == ("<1@test>", "test", rule.id)
     [(to, subject, body)] = sender.sent
     assert (to, subject) == (REVIEWER, "Review HSN-8708-duty")
-    assert body == svc.compose_review_body(rule, "changed")
+    assert body == svc.compose_review_body(
+        compliance_service.review_context(db_session, rule.id), "changed"
+    )
     event = db_session.scalars(
         select(AuditEvent).where(AuditEvent.action == "notification.review_email_sent")
     ).one()

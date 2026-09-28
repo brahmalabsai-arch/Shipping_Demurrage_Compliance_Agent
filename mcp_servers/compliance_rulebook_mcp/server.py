@@ -10,7 +10,13 @@ from uuid import UUID
 
 from mcp_servers.common import ToolContext, configure_logging, create_server, run_tool
 from models.enums import RuleDecision, RuleStatus
-from models.schemas import ComplianceRuleRecord, RuleMatch, RuleProposal
+from models.schemas import (
+    ComplianceRuleRecord,
+    ReviewContext,
+    RuleDrift,
+    RuleMatch,
+    RuleProposal,
+)
 from services import compliance_service as svc
 
 mcp = create_server(
@@ -77,14 +83,33 @@ async def propose_change(ctx: ToolContext, proposal: RuleProposal) -> Compliance
 
 @mcp.tool()
 async def decide(
-    ctx: ToolContext, rule_id: UUID, decision: RuleDecision, reviewer: str
+    ctx: ToolContext,
+    rule_id: UUID,
+    decision: RuleDecision,
+    reviewer: str,
+    note: str | None = None,
 ) -> ComplianceRuleRecord:
     """Record a human reviewer's final approve/reject of a pending rule — the only way a rule
-    becomes approved. ``reviewer`` must name the person deciding."""
-    return await run_tool(
-        ctx, "decide", {"rule_id": rule_id, "decision": decision, "reviewer": reviewer},
-        lambda s, _: svc.decide(s, rule_id, decision, reviewer),
-    )  # fmt: skip
+    becomes approved. ``reviewer`` must name the person deciding; a rejection needs a ``note``
+    giving the reason (optional for an approval)."""
+    arguments = {"rule_id": rule_id, "decision": decision, "reviewer": reviewer, "note": note}
+    return await run_tool(ctx, "decide", arguments,
+                          lambda s, _: svc.decide(s, rule_id, decision, reviewer, note))  # fmt: skip
+
+
+@mcp.tool()
+async def get_review_context(ctx: ToolContext, rule_id: UUID) -> ReviewContext:
+    """What a reviewer judges a proposal against: the rule in force it would replace and the
+    history since (other proposals — pending, or rejected and why)."""
+    return await run_tool(ctx, "get_review_context", {"rule_id": rule_id},
+                          lambda s, _: svc.review_context(s, rule_id))  # fmt: skip
+
+
+@mcp.tool()
+async def list_bulletin_drift(ctx: ToolContext) -> list[RuleDrift]:
+    """Rules where the latest scanned bulletin differs from the approved rule in force, each
+    marked if that exact text is already pending or was rejected before."""
+    return await run_tool(ctx, "list_bulletin_drift", {}, lambda s, _: svc.bulletin_drift(s))
 
 
 def main() -> None:

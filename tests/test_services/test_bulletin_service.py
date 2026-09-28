@@ -311,3 +311,22 @@ def test_database_allows_a_single_publication_row(db_session: Session) -> None:
         db_session.execute(
             text("INSERT INTO bulletin.publication (content, updated_by) VALUES ('x', 'y')")
         )
+
+
+def test_mark_emailed_stamps_once_and_audits_once(db_session: Session) -> None:
+    svc.publish(db_session, BASELINE_BULLETIN, EDITOR)
+    _scan(db_session)
+    svc.publish(db_session, DUTY_RAISED, EDITOR)
+    entry = _scan(db_session)
+    assert entry is not None
+
+    first = svc.mark_emailed(db_session, entry.id, "agent")
+    again = svc.mark_emailed(db_session, entry.id, "agent")
+
+    assert first.emailed_at is not None and again.emailed_at == first.emailed_at
+    emailed = db_session.scalars(
+        select(AuditEvent).where(AuditEvent.action == "bulletin_change.emailed")
+    ).all()
+    assert len(emailed) == 1
+    with pytest.raises(ChangeLogEntryNotFoundError):
+        svc.mark_emailed(db_session, entry.prior_snapshot_id, "agent")

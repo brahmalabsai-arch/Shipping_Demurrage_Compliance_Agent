@@ -17,8 +17,6 @@ Argument validation happens before ``work`` runs: FastMCP validates the call aga
 tool's typed signature, so malformed input never reaches a service.
 """
 
-import logging
-import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -32,12 +30,14 @@ from pydantic_core import to_jsonable_python
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
-from config.settings import get_settings
+from config.log_setup import configure_logging
 from services.db import session_scope
 from services.errors import CustomsCopilotError, DatabaseUnavailableError
 
 T = TypeVar("T")
 ToolContext = Context[Any, Any, Any]
+
+__all__ = ["Caller", "ToolContext", "configure_logging", "create_server", "run_tool"]
 
 logger = structlog.get_logger("mcp")
 
@@ -115,20 +115,3 @@ async def run_tool(
     log.info("mcp.tool_call", outcome="ok", result=to_jsonable_python(result, fallback=str),
              duration_ms=elapsed())  # fmt: skip
     return result
-
-
-def configure_logging() -> None:
-    """JSON logs to **stderr** — stdout carries the MCP stdio protocol and must stay clean."""
-    level = logging.getLevelNamesMapping().get(get_settings().log_level.upper(), logging.INFO)
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso", utc=True),
-            structlog.processors.format_exc_info,
-            structlog.processors.JSONRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-        cache_logger_on_first_use=True,
-    )

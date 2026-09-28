@@ -4,6 +4,8 @@ Reads and writes go through ``services.compliance_service`` — the same functio
 ``compliance_rulebook_mcp`` and the agents use. A proposal (from here or from the Regulatory
 Watch agent) is always ``pending``; only the Approve / Reject buttons, which call
 ``compliance_service.decide`` with the reviewer named in the sidebar, change a rule's status.
+A proposal is always shown against the **rule in force** (``compliance_service.review_context``)
+with the history since it; a rejection must give a reason, stored with the decision.
 """
 
 from datetime import date
@@ -13,7 +15,7 @@ import streamlit as st
 
 from dashboards.ui import fmt_ist, run_action, show_flash
 from models.enums import RuleDecision
-from models.schemas import ComplianceRuleRecord, RuleProposal
+from models.schemas import ComplianceRuleRecord, ReviewContext, RuleProposal
 from services import bulletin_service
 from services import compliance_service as svc
 from services.db import session_scope
@@ -37,58 +39,70 @@ def _parse_codes(raw: str) -> list[str]:
 # --------------------------------------------------------------------------- pending review
 
 
-def _decide(rule: ComplianceRuleRecord, decision: RuleDecision, reviewer: str) -> None:
+def _decide(rule: ComplianceRuleRecord, decision: RuleDecision, reviewer: str, note: str) -> None:
     verb = "Approved" if decision is RuleDecision.APPROVE else "Rejected"
     run_action(
-        lambda session: svc.decide(session, rule.id, decision, reviewer),
+        lambda session: svc.decide(session, rule.id, decision, reviewer, note),
         f"{verb} {rule.rule_key} v{rule.version} (decided by {reviewer.strip()}).",
     )
 
 
-def _render_proposal(
-    rule: ComplianceRuleRecord, current: ComplianceRuleRecord | None, reviewer: str
-) -> None:
+def _render_against_in_force(rule: ComplianceRuleRecord, in_force: ComplianceRuleRecord) -> None:
+    st.markdown(f"**What would change** — compared with the rule in force, v{in_force.version}:")
+    meta = []
+    if in_force.effective_date != rule.effective_date:
+        meta.append(f"effective date {in_force.effective_date} -> {rule.effective_date}")
+    if in_force.hs_codes != rule.hs_codes:
+        meta.append(f"HS codes {_codes(in_force)} -> {_codes(rule)}")
+    if meta:
+        st.write("; ".join(meta))
+    diff = bulletin_service.unified_diff(
+        in_force.content,
+        rule.content,
+        f"v{in_force.version} (in force)",
+        f"v{rule.version} (proposed)",
+    )
+    st.code(diff or "(text unchanged)", language="diff")
+
+
+def _render_proposal(context: ReviewContext, reviewer: str) -> None:
+    rule, in_force = context.proposal, context.in_force
     with st.container(border=True):
         st.markdown(f"**{rule.rule_key} v{rule.version}** — proposed {fmt_ist(rule.created_at)}")
-        if rule.change_summary:
-            st.caption(rule.change_summary)
         c1, c2, c3 = st.columns(3)
         c1.write(f"Effective: {rule.effective_date}")
         c2.write(f"HS codes: {_codes(rule)}")
-        c3.write("Source: bulletin change" if rule.source_diff_id else "Source: manual proposal")
-        if current is None:
-            st.info("New rule — no approved version yet.")
+        c3.write(
+            "Source: bulletin scan" if rule.source_diff_id else "Source: rulebook check / manual"
+        )
+        if rule.change_summary:
+            st.caption(f"Summary when proposed: {rule.change_summary}")
+        for line in context.history:
+            st.warning(line)
+        if in_force is None:
+            st.info("New rule — nothing is approved for it yet.")
             st.write(rule.content)
         else:
-            st.caption(f"Changes against the version in force (v{current.version}):")
-            meta = []
-            if current.effective_date != rule.effective_date:
-                meta.append(f"effective date {current.effective_date} -> {rule.effective_date}")
-            if current.hs_codes != rule.hs_codes:
-                meta.append(f"HS codes {_codes(current)} -> {_codes(rule)}")
-            if meta:
-                st.write("; ".join(meta))
-            diff = bulletin_service.unified_diff(current.content, rule.content)
-            st.code(diff or "(text unchanged)", language="diff")
+            _render_against_in_force(rule, in_force)
+        note = st.text_input(
+            "Reason (required to reject; optional to approve)", "", key=f"note_{rule.id}"
+        )
         b1, b2, _ = st.columns([1, 1, 4])
         if b1.button("Approve", key=f"approve_{rule.id}", type="primary"):
-            _decide(rule, RuleDecision.APPROVE, reviewer)
+            _decide(rule, RuleDecision.APPROVE, reviewer, note)
         if b2.button("Reject", key=f"reject_{rule.id}"):
-            _decide(rule, RuleDecision.REJECT, reviewer)
+            _decide(rule, RuleDecision.REJECT, reviewer, note)
 
 
-def render_pending(
-    pending: list[ComplianceRuleRecord], approved: list[ComplianceRuleRecord], reviewer: str
-) -> None:
+def render_pending(contexts: list[ReviewContext], reviewer: str) -> None:
     st.subheader("Pending review")
-    if not pending:
+    if not contexts:
         st.info("Nothing awaiting review.")
         return
     if not reviewer.strip():
         st.warning("Enter your name as *Reviewer* in the sidebar before deciding.")
-    current = {r.rule_key: r for r in approved}
-    for rule in pending:
-        _render_proposal(rule, current.get(rule.rule_key), reviewer)
+    for context in contexts:
+        _render_proposal(context, reviewer)
 
 
 # --------------------------------------------------------------------------- rulebook
@@ -133,6 +147,7 @@ def render_history(rules: list[ComplianceRuleRecord]) -> None:
                 "Proposed": fmt_ist(r.created_at),
                 "Decided by": r.decided_by or "",
                 "Decided at": fmt_ist(r.decided_at) if r.decided_at else "",
+                "Reason": r.decision_note or "",
                 "Summary": r.change_summary or "",
             }
             for r in rules
@@ -203,6 +218,7 @@ proposer = st.sidebar.text_input(
 )
 with session_scope() as db:
     pending_rules = svc.list_pending(db)
+    review_contexts = [svc.review_context(db, rule.id) for rule in pending_rules]
     approved_rules = svc.list_approved(db)
     all_rules = svc.list_rules(db)
 
@@ -210,7 +226,7 @@ pending_tab, rulebook_tab, history_tab, propose_tab = st.tabs(
     [f"Pending review ({len(pending_rules)})", "Rulebook in force", "All versions", "Propose"]
 )
 with pending_tab:
-    render_pending(pending_rules, approved_rules, reviewer_name)
+    render_pending(review_contexts, reviewer_name)
 with rulebook_tab:
     render_rulebook(approved_rules)
 with history_tab:

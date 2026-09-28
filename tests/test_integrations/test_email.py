@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from config.settings import Settings
 from integrations import email
+from integrations.gmail_client import GmailSender
 from services.errors import EmailDeliveryError
 
 
@@ -45,5 +46,6 @@ def test_backend_is_chosen_from_settings(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert isinstance(sender, email.OutboxSender) and sender.directory == tmp_path
 
     monkeypatch.setattr(email, "get_settings", lambda: gmail)
-    with pytest.raises(EmailDeliveryError, match="Phase 6"):
-        email.get_email_sender()
+    gmail_sender = email.get_email_sender()
+    assert isinstance(gmail_sender, GmailSender)
+    assert gmail_sender.token_path == gmail.gmail_token_path

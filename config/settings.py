@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     # Regulatory Watch scheduler (Phase 6)
     watch_scan_interval_minutes: int = 15
 
+    # LLMs via LangChain. Two tiers per provider: reasoning (agent reasoning) and summary
+    # (short plain-language text). Without the chosen provider's key, agents fall back to
+    # deterministic output.
+    llm_provider: Literal["groq", "openai"] = "groq"
+    groq_api_key: SecretStr | None = None
+    groq_reasoning_model: str = "openai/gpt-oss-120b"
+    groq_summary_model: str = "openai/gpt-oss-20b"
+    openai_api_key: SecretStr | None = None
+    openai_reasoning_model: str = "gpt-5.5"
+    openai_summary_model: str = "gpt-5.4-mini"
+
     log_level: str = "INFO"
 
     @property

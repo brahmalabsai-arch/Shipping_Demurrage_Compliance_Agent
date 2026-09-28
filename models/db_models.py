@@ -337,8 +337,9 @@ class ComplianceRule(Base):
     Every row is created ``pending``; ``compliance_service.decide`` is the only code path that
     sets ``approved``/``rejected``. A trigger created in migration ``0004`` enforces the same
     lifecycle in Postgres: inserts must be pending and undecided, a decision happens once and
-    names its reviewer, only an approved row can be superseded, the rule text never changes and
-    rows are never deleted. At most one approved, unsuperseded version per ``rule_key``.
+    names its reviewer (a rejection also its reason — ``decision_note``, migration ``0006``),
+    only an approved row can be superseded, the rule text never changes and rows are never
+    deleted. At most one approved, unsuperseded version per ``rule_key``.
     """
 
     __tablename__ = "rules"
@@ -369,6 +370,8 @@ class ComplianceRule(Base):
     )
     decided_by: Mapped[str | None] = mapped_column(Text)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The reviewer's reason — required for a rejection (trigger, migration 0006).
+    decision_note: Mapped[str | None] = mapped_column(Text)
 
 
 # --------------------------------------------------------------------------- audit

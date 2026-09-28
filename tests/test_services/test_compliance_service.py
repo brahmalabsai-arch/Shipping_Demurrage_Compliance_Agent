@@ -135,13 +135,13 @@ def test_rejection_is_permanent(db_session: Session) -> None:
     v1 = _approved_v1(db_session)
     v2 = _propose(db_session, "BCD 20%.")
 
-    rejected = svc.decide(db_session, v2.id, REJECT, REVIEWER)
+    rejected = svc.decide(db_session, v2.id, REJECT, REVIEWER, "not yet notified")
 
     assert rejected.status is RuleStatus.REJECTED
     assert svc.get_current_rule(db_session, KEY).id == v1.id
     for decision in (APPROVE, REJECT):
         with pytest.raises(RuleAlreadyDecidedError):
-            svc.decide(db_session, v2.id, decision, "another reviewer")
+            svc.decide(db_session, v2.id, decision, "another reviewer", "second opinion")
     assert svc.get_rule(db_session, v2.id).status is RuleStatus.REJECTED
 
 
@@ -149,7 +149,7 @@ def test_approved_rule_cannot_be_decided_again(db_session: Session) -> None:
     v1 = _approved_v1(db_session)
 
     with pytest.raises(RuleAlreadyDecidedError):
-        svc.decide(db_session, v1.id, REJECT, REVIEWER)
+        svc.decide(db_session, v1.id, REJECT, REVIEWER, "not yet notified")
 
 
 @pytest.mark.parametrize(("decision", "reviewer"), [("approve", "   "), ("publish", REVIEWER)])
@@ -205,7 +205,10 @@ def test_older_proposal_cannot_be_approved_after_a_newer_one(db_session: Session
     with pytest.raises(StaleProposalError, match="reject it instead"):
         svc.decide(db_session, v2.id, APPROVE, REVIEWER)
 
-    assert svc.decide(db_session, v2.id, REJECT, REVIEWER).status is RuleStatus.REJECTED
+    assert (
+        svc.decide(db_session, v2.id, REJECT, REVIEWER, "not yet notified").status
+        is RuleStatus.REJECTED
+    )
     assert svc.get_current_rule(db_session, KEY).id == v3.id
 
 
@@ -287,7 +290,7 @@ def test_rejected_change_is_not_re_proposed_when_the_bulletin_is_unchanged(
     edited = edit_section(BASELINE_BULLETIN, KEY, "15% of the assessable", "20% of the assessable")
     entry = _bulletin_change(db_session, edited)
     [proposal] = _propose_from(db_session, entry.id)
-    svc.decide(db_session, proposal.id, REJECT, REVIEWER)
+    svc.decide(db_session, proposal.id, REJECT, REVIEWER, "not yet notified")
 
     assert bulletin_service.diff_since_last(db_session, "scan") is None  # same pair
     bulletin_service.capture_snapshot(db_session, "scan")
@@ -419,7 +422,7 @@ def test_database_keeps_decided_rules_final(
     db_session: Session, statement: str, message: str
 ) -> None:
     rule = _propose(db_session, "BCD 15%.")
-    svc.decide(db_session, rule.id, REJECT, REVIEWER)
+    svc.decide(db_session, rule.id, REJECT, REVIEWER, "not yet notified")
 
     with pytest.raises(IntegrityError, match=message), db_session.begin_nested():
         db_session.execute(text(statement), {"id": rule.id})
@@ -470,3 +473,132 @@ def test_search_ranks_approved_rules_by_query_overlap(db_session: Session) -> No
     assert "PENDING-KR" not in {m.rule.rule_key for m in everything}  # approved only
     assert svc.search_rules(db_session, "the of and") == []  # stopwords only
     assert len(svc.search_rules(db_session, "certificate origin rate", limit=1)) == 1
+
+
+# --------------------------------------------------------------------------- decision reasons
+
+
+def test_a_rejection_needs_a_reason_and_keeps_it(db_session: Session) -> None:
+    _approved_v1(db_session)
+    v2 = _propose(db_session, "BCD 20%.")
+
+    with pytest.raises(InvalidDecisionError, match="reason"):
+        svc.decide(db_session, v2.id, REJECT, REVIEWER, "   ")
+    rejected = svc.decide(db_session, v2.id, REJECT, REVIEWER, "  awaiting notification  ")
+
+    assert rejected.decision_note == "awaiting notification"
+    event = db_session.scalars(
+        select(AuditEvent).where(AuditEvent.action == "compliance_rule.rejected")
+    ).one()
+    assert event.payload["note"] == "awaiting notification"
+
+
+def test_an_approval_may_carry_a_note(db_session: Session) -> None:
+    rule = _propose(db_session, "BCD 15%.")
+
+    assert svc.decide(db_session, rule.id, APPROVE, REVIEWER).decision_note is None
+    other = _propose(db_session, "x", rule_key="OTHER")
+    assert svc.decide(db_session, other.id, APPROVE, REVIEWER, "checked").decision_note == "checked"
+
+
+def test_database_requires_a_reason_to_reject_and_keeps_it_immutable(db_session: Session) -> None:
+    rule = _propose(db_session, "BCD 15%.")
+    reject_without_reason = (
+        "UPDATE compliance.rules SET status = 'rejected', decided_by = 'x', decided_at = now()"
+        " WHERE id = :id"
+    )
+    with pytest.raises(IntegrityError, match="needs a reason"), db_session.begin_nested():
+        db_session.execute(text(reject_without_reason), {"id": rule.id})
+
+    svc.decide(db_session, rule.id, REJECT, REVIEWER, "original reason")
+    with pytest.raises(IntegrityError, match="immutable"), db_session.begin_nested():
+        db_session.execute(
+            text("UPDATE compliance.rules SET decision_note = 'rewritten' WHERE id = :id"),
+            {"id": rule.id},
+        )
+
+
+# --------------------------------------------------------------------------- review context
+
+
+def test_review_context_is_against_the_rule_in_force_with_history(db_session: Session) -> None:
+    v1 = _approved_v1(db_session)  # 15% in force
+    v2 = _propose(db_session, "BCD 20%.")
+    svc.decide(db_session, v2.id, REJECT, "a.sharma", "awaiting official notification")
+    v3 = _propose(db_session, "BCD 22%.")  # still pending, older than v4
+    v4 = _propose(db_session, "BCD 25%.")
+
+    context = svc.review_context(db_session, v4.id)
+
+    assert context.in_force is not None and context.in_force.id == v1.id
+    assert [o.version for o in context.others] == [2, 3]
+    rejected, pending = context.history
+    assert rejected.startswith("v2 (proposed ") and "was rejected by a.sharma on " in rejected
+    assert rejected.endswith(': "awaiting official notification"')
+    assert pending.startswith("v3 (proposed ") and "superseded by this proposal" in pending
+    # seen from the older pending proposal, the newer one is flagged
+    older = svc.review_context(db_session, v3.id)
+    assert any(line.startswith("A newer proposal, v4") for line in older.history)
+
+
+def test_review_context_of_a_brand_new_rule(db_session: Session) -> None:
+    rule = _propose(db_session, "Brand new rule.", rule_key="NEW-RULE")
+
+    context = svc.review_context(db_session, rule.id)
+
+    assert (context.in_force, context.others, context.history) == (None, [], [])
+
+
+# --------------------------------------------------------------------------- bulletin drift
+
+
+def _scan_published(db_session: Session, bulletin: str) -> None:
+    bulletin_service.publish(db_session, bulletin, "editor")
+    bulletin_service.capture_snapshot(db_session, "scan")
+
+
+def test_bulletin_drift_compares_the_latest_scan_with_the_rulebook(db_session: Session) -> None:
+    for section in bulletin_service.parse_sections(BASELINE_BULLETIN):
+        rule = svc.propose_change(
+            db_session,
+            RuleProposal(rule_key=section.rule_key, content=section.text,
+                         hs_codes=list(section.hs_codes), effective_date=section.effective_date),
+            "seed",
+        )  # fmt: skip
+        svc.decide(db_session, rule.id, APPROVE, "seed")
+    _scan_published(db_session, BASELINE_BULLETIN)
+    assert svc.bulletin_drift(db_session) == []
+
+    edited = edit_section(BASELINE_BULLETIN, KEY, "15% of the assessable", "20% of the assessable")
+    edited = edit_section(edited, "VAL-exchange-rate", "Assessable value", "ASSESSABLE   value")
+    edited = edit_section(edited, "ORG-KR-CEPA", "## ORG-KR-CEPA", "## ORG-JP-CEPA")
+    _scan_published(db_session, edited)
+
+    drifts = {d.rule_key: d for d in svc.bulletin_drift(db_session)}
+
+    assert set(drifts) == {KEY, "ORG-JP-CEPA"}  # the formatting-only edit is not drift
+    in_force = drifts[KEY].in_force
+    assert in_force is not None and in_force.version == 1
+    assert "20%" in drifts[KEY].section.text
+    assert drifts["ORG-JP-CEPA"].in_force is None
+    assert drifts[KEY].pending_same is None and drifts[KEY].rejected_same is None
+
+
+def test_bulletin_drift_knows_pending_and_rejected_versions_of_the_same_text(
+    db_session: Session,
+) -> None:
+    _approved_v1(db_session)
+    bulletin = (
+        "Preamble.\n\n## HSN-8708-duty\nEffective: 2026-04-01\nHS codes: 8708\nBCD 20%.\n\n"
+        "## OTHER\nEffective: 2026-04-01\nHS codes: all\nOther rule.\n"
+    )
+    _scan_published(db_session, bulletin)
+    pending = _propose(db_session, "BCD 20%.")
+    other = _propose(db_session, "Other rule.", rule_key="OTHER", hs_codes=[])
+    svc.decide(db_session, other.id, REJECT, REVIEWER, "not applicable to us")
+
+    drifts = {d.rule_key: d for d in svc.bulletin_drift(db_session)}
+
+    same_pending, same_rejected = drifts[KEY].pending_same, drifts["OTHER"].rejected_same
+    assert same_pending is not None and same_pending.id == pending.id
+    assert same_rejected is not None and same_rejected.decision_note == "not applicable to us"

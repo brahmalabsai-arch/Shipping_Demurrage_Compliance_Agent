@@ -56,8 +56,13 @@ def run_action(action: Callable[[Session], Any], success: str) -> None:
     except CustomsCopilotError as exc:
         st.error(f"{type(exc).__name__}: {exc}")
     else:
-        st.session_state[_FLASH_KEY] = success
+        flash(success)
         st.rerun()
+
+
+def flash(message: str) -> None:
+    """Queue a success message for the next run (shown by :func:`show_flash`)."""
+    st.session_state[_FLASH_KEY] = message
 
 
 def show_flash() -> None:

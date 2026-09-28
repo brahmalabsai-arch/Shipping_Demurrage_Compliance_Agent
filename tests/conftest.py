@@ -12,10 +12,12 @@ Any test using these fixtures is auto-marked ``db`` (CI runs it in the Postgres 
 """
 
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
+from pydantic import ValidationError
 from sqlalchemy import Connection, Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -37,6 +39,21 @@ def _alembic(connection: Connection) -> Config:
     cfg.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
     cfg.attributes["connection"] = connection
     return cfg
+
+
+@pytest.fixture(autouse=True)
+def _no_external_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """No test may reach a paid or real external service: the LLM keys from ``.env`` are
+    cleared (agents use their deterministic fallbacks unless a test injects a fake model) and
+    email goes to a per-test outbox directory (never Gmail)."""
+    try:
+        settings = get_settings()
+    except ValidationError:  # CI's unit job has no .env; nothing to neutralise
+        return
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    monkeypatch.setattr(settings, "groq_api_key", None)
+    monkeypatch.setattr(settings, "email_backend", "outbox")
+    monkeypatch.setattr(settings, "outbox_path", tmp_path / "outbox")
 
 
 @pytest.fixture(scope="session")

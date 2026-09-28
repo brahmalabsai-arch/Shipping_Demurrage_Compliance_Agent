@@ -133,3 +133,17 @@ class BulletinSnapshotNotFoundError(CustomsCopilotError):
 
 class EmailDeliveryError(CustomsCopilotError):
     """The review email could not be sent (backend unavailable, rejected, or not configured)."""
+
+
+# --------------------------------------------------------------------------- agents (Phase 6)
+
+
+class McpToolError(CustomsCopilotError):
+    """An MCP tool call returned an error; ``error_type`` is the server-side error class name
+    (e.g. ``DuplicateProposalError``, ``EmailDeliveryError``, ``ValidationError``)."""
+
+    def __init__(self, tool: str, error_type: str, message: str) -> None:
+        super().__init__(f"{tool}: {error_type}: {message}")
+        self.tool = tool
+        self.error_type = error_type
+        self.message = message

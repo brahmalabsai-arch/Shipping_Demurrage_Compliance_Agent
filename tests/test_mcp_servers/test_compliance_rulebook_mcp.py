@@ -19,6 +19,8 @@ TOOLS_TESTED = {
     "get_current_rule",
     "propose_change",
     "decide",
+    "get_review_context",
+    "list_bulletin_drift",
 }
 KEY = "HSN-8708-duty"
 
@@ -94,3 +96,36 @@ async def test_a_proposal_cannot_smuggle_in_a_status(seeded: None, direct: Any) 
 
     assert result.isError
     assert direct(lambda s: svc.list_pending(s)) == []
+
+
+async def test_review_context_and_drift_over_mcp(
+    seeded: None, direct: Any, session_factory: Any
+) -> None:
+    from services import bulletin_service
+    from tests.fixtures.compliance import BASELINE_BULLETIN, edit_section
+
+    with session_factory() as session, session.begin():
+        bulletin_service.publish(session, edit_section(
+            BASELINE_BULLETIN, KEY, "15% of the assessable", "20% of the assessable"), "editor")  # fmt: skip
+        bulletin_service.capture_snapshot(session, "scan")
+    current = direct(lambda s: svc.get_current_rule(s, KEY))
+    proposal = {"rule_key": KEY, "content": current.content.replace("15%", "20%"),
+                "hs_codes": ["8708"], "effective_date": "2026-04-01"}  # fmt: skip
+    async with connect(mcp) as client:
+        drift_before = await client.call_tool("list_bulletin_drift", {})
+        assert_parity(drift_before, direct(svc.bulletin_drift))
+        proposed = structured(await client.call_tool("propose_change", {"proposal": proposal}))
+        rejected = structured(await client.call_tool("decide", {
+            "rule_id": proposed["id"], "decision": "reject", "reviewer": "a.sharma",
+            "note": "awaiting notification"}))  # fmt: skip
+        context = await client.call_tool("get_review_context", {"rule_id": proposed["id"]})
+        drift_after = await client.call_tool("list_bulletin_drift", {})
+
+    assert structured(drift_before)["result"][0]["rule_key"] == KEY
+    assert rejected["decision_note"] == "awaiting notification"
+    assert_parity(context, direct(lambda s: svc.review_context(s, proposed["id"])))
+    assert structured(context)["in_force"]["version"] == 1
+    assert_parity(drift_after, direct(svc.bulletin_drift))
+    assert structured(drift_after)["result"][0]["rejected_same"]["decision_note"] == (
+        "awaiting notification"
+    )

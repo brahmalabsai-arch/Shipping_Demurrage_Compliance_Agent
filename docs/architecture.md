@@ -9,7 +9,7 @@
 | Language/runtime | Python 3.11+ | Matches existing stack; async support needed for FastAPI + MCP |
 | API/service layer | FastAPI | Already in stack; also hosts the APScheduler process for the Regulatory Watch Agent |
 | Agent orchestration | LangGraph (`StateGraph`) | Already in stack; native support for conditional edges, persistence, and `interrupt()`-based human-in-the-loop — directly reusable from the last-mile delivery control tower project's HITL pattern |
-| LLM tool-calling | LangChain | Already in stack; tool binding for agents |
+| LLM tool-calling | LangChain + **OpenAI** (`langchain-openai`): `OPENAI_REASONING_MODEL` (default gpt-5.5) for agent reasoning, `OPENAI_SUMMARY_MODEL` (default gpt-5.4-mini) for summaries | Already in stack; tool binding for agents. No key → deterministic fallbacks |
 | Relational data store | PostgreSQL 15+ (native local install; developed against 18.x) | Structured, relational data (shipments, rates, rules) with real transactional integrity; matches ongoing SQL study track |
 | Vector store (RAG) | ChromaDB, embedded (`chromadb.PersistentClient` at `CHROMA_PATH`) | Already in stack; holds embedded compliance rule chunks; in-process, so no server to run |
 | Embeddings / retrieval | BGE embeddings + BM25 + Reciprocal Rank Fusion + cross-encoder reranking | Reuses the exact retrieval pipeline already mastered (PolicyMind-equivalent) |
@@ -199,6 +199,7 @@ source_diff_id UUID NULL FK -> bulletin.change_log.id
 created_at     TIMESTAMPTZ DEFAULT now()
 decided_by     TEXT NULL      -- human reviewer identifier
 decided_at     TIMESTAMPTZ NULL
+decision_note  TEXT NULL      -- the reviewer's reason; required to reject (migration 0006)
 -- UNIQUE (rule_key, version); CHECK version >= 1; hs_codes '{}' = applies to all goods.
 -- UNIQUE INDEX (rule_key) WHERE status='approved' AND superseded_by IS NULL
 --   → at most one version in force per rule.
@@ -207,6 +208,12 @@ decided_at     TIMESTAMPTZ NULL
 --   superseded_by (once); rule text/metadata immutable; no deletes.
 -- Approving vN supersedes the version in force; approving an older proposal after a newer
 --   version was approved raises StaleProposalError. Pending siblings are never touched.
+-- Reviewers judge a proposal against the RULE IN FORCE, never against the previous bulletin
+--   scan: compliance_service.review_context(rule_id) = the version in force + the history
+--   since it (other proposals: pending/superseded, or rejected with reason), shared by the
+--   Compliance page and the review email. compliance_service.bulletin_drift() lists rules where
+--   the latest scanned bulletin differs (beyond whitespace/case) from the rule in force, noting
+--   an identical pending or rejected version.
 ```
 
 ### 3.8 `bulletin.publication` / `bulletin.snapshots` / `bulletin.change_log`
@@ -296,7 +303,9 @@ scorer until the Phase 9 hybrid retriever replaces it behind the same service fu
 `get_rule(rule_id)`, `get_current_rule(rule_key)`, `propose_change(proposal: RuleProposal)`
 (rule_key, content, hs_codes, effective_date, change_summary?, source_diff_id? — status forced
 to `pending`; there is no status field), `decide(rule_id, decision: "approve"|"reject",
-reviewer)` (only path to `approved`; a named reviewer is required).
+reviewer, note?)` (only path to `approved`; a named reviewer is required, and a reason to
+reject), `get_review_context(rule_id) -> ReviewContext`, `list_bulletin_drift() ->
+list[RuleDrift]` (Phase 6).
 
 **`customs_bulletin_mcp`** — `get_current_snapshot()` (latest *scan*),
 `diff_since_last_scan() -> ChangeLogEntryRecord | None` (idempotent),
@@ -318,6 +327,27 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
 - **Shipment pipeline** (triggered per shipment, or on status change): `document_verification_agent → demurrage_risk_agent → compliance_rag_agent → clearance_checklist_agent`, fan-out/fan-in via LangGraph parallel branches where independent, joined at `clearance_checklist_agent`.
 - **Regulatory watch pipeline** (triggered by the scheduler, not a shipment): `regulatory_watch_agent` alone, ending either at a no-op or at a `propose_change` MCP call + email.
 
+  *As built (Phase 6):* `scheduler/watch_scheduler.py::run_scan` captures a snapshot (service
+  call — the only capture site), then runs a one-node `StateGraph[WatchState]`
+  (`agents/state.py`). The agent reaches data only through MCP (`agents/mcp_clients.py`:
+  `open_toolbox` connects to the role's servers only — stdio subprocesses in production,
+  in-memory in tests — passes `_meta` actor/run_id and raises `McpToolError` with the server's
+  error type). Its control flow is **deterministic** (the guarantees — idempotency, one
+  proposal per `rule_key`, never approve — are not judgement calls): `diff_since_last_scan` →
+  records the detection (and `get_section_changes` links proposals to it and flags removed
+  rules as `regulatory_watch.removed_sections_flagged` — no repeal workflow yet); then
+  `list_bulletin_drift` → for every rule where the scanned bulletin differs from the **rule in
+  force** (this also catches a change made before the first scan), unless that exact text is
+  already pending or was rejected before (never re-raised), a summary *against the rule in
+  force* + `propose_change` → `send_review_email` per proposal (the email compares with the rule
+  in force and lists the history since it). The LLM (summary tier) only writes the
+  plain-language summary; a reply that is empty, fails, or contains a number absent from the
+  two texts is replaced by a deterministic template summary. Agent-level outcomes are audited as `agent_run` events
+  (`regulatory_watch.completed`, `.email_failed`, `.failed`) by `agents/audit.py`.
+  Until the FastAPI app exists the scheduler runs as its own process
+  (`python -m scheduler.watch_scheduler`, or `--once`); the Customs Bulletin page's
+  "Run scheduled scan now" fires the same job.
+
 **Human-in-the-loop**: implemented with LangGraph's native `interrupt()` inside `supervisor.py` at exactly two points — before `compliance_rulebook_mcp.decide()` is allowed to fire, and before a shipment can transition to `cleared`/filed. Graph state is persisted via `PostgresSaver` (LangGraph checkpointer, same Postgres instance), so an interrupted run survives process restarts and resumes cleanly when a human acts through the dashboard — this reuses the HITL pattern already proven in the delivery control tower project.
 
 ## 7. Gmail integration (OAuth)
@@ -325,7 +355,7 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
 - Google Cloud Console project, OAuth consent screen in **Testing** mode, `brahmalabs.ai@gmail.com` added as a test user.
 - Scope: `https://www.googleapis.com/auth/gmail.send` only (least privilege — no read/modify).
 - `google-auth-oauthlib.InstalledAppFlow` for the one-time local browser consent; resulting `token.json` (refresh token) cached under a git-ignored `secrets/` directory, auto-refreshed by `google.auth.transport.requests.Request()` on expiry.
-- `integrations/gmail_client.py` exposes `send(to, subject, body)`, called only from `notifications_mcp`.
+- `integrations/gmail_client.py` exposes `GmailSender.send(to, subject, body)`, reached only through `notifications_mcp` → `notification_service` → `integrations.email.get_email_sender()` when `EMAIL_BACKEND=gmail` (default `outbox`: `.eml` files, no network). Sends never open a browser: `python -m integrations.gmail_client authorize` does the one-time consent, `send-test` checks delivery. Step-by-step setup: `docs/setup_gmail.md`. Review emails go to `REVIEWER_EMAIL`; a successful send stamps `bulletin.change_log.emailed_at` (first email only).
 - Failure handling: a send failure raises `EmailDeliveryError`, caught by `regulatory_watch_agent`, which still commits the `pending` rule change to `compliance.rules` and logs the failure to `audit.events` (per the edge-case requirement that a failed email must never lose the detected change).
 
 ## 8. FX resolution engine (`fx_service.resolve_rate`)

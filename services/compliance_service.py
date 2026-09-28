@@ -5,25 +5,41 @@ and the agents. Governance guarantees (problem statement FR6/FR7):
 
 * ``propose_change`` always stores a new version as ``pending`` — it has no status parameter.
 * ``decide`` is the **only** function that changes ``status`` (a test scans the codebase for
-  any other assignment), and it requires a named human reviewer. A decision is final.
+  any other assignment), and it requires a named human reviewer — and, to reject, a reason
+  (``decision_note``). A decision is final.
 * Approving version N supersedes the currently approved version of that ``rule_key``; pending
   proposals of the same key are never touched by another proposal's decision, and an older
   proposal can no longer be approved once a newer version is (``StaleProposalError``).
 
-A trigger (migration ``0004``) enforces the same lifecycle in Postgres. Rule versions are never
-edited or deleted: a change is a new version, and history is the chain of ``superseded_by``.
+A trigger (migrations ``0004``/``0006``) enforces the same lifecycle in Postgres. Rule versions
+are never edited or deleted: a change is a new version, and history is the chain of
+``superseded_by``.
+
+Reviewers always judge a proposal against the **rule in force** (the approved version), not
+against whatever the bulletin said at the previous scan: ``review_context`` gives that version
+plus the history in between (other proposals — still pending, or rejected and why), and
+``bulletin_drift`` lists every rule where the latest scanned bulletin disagrees with the rule in
+force.
 """
 
 import re
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models.db_models import ChangeLogEntry, ComplianceRule, utcnow
 from models.enums import RuleDecision, RuleStatus
-from models.schemas import ComplianceRuleRecord, RuleMatch, RuleProposal
-from services import audit_service
+from models.schemas import (
+    BulletinSection,
+    ComplianceRuleRecord,
+    ReviewContext,
+    RuleDrift,
+    RuleMatch,
+    RuleProposal,
+)
+from services import audit_service, bulletin_service
 from services.errors import (
     ChangeLogEntryNotFoundError,
     DuplicateProposalError,
@@ -32,6 +48,8 @@ from services.errors import (
     RuleNotFoundError,
     StaleProposalError,
 )
+
+BUSINESS_TZ = ZoneInfo("Asia/Kolkata")  # dates in review history are the reviewer's (IST) days
 
 # --------------------------------------------------------------------------- reads
 
@@ -221,15 +239,20 @@ def propose_change(session: Session, proposal: RuleProposal, actor: str) -> Comp
 
 
 def decide(
-    session: Session, rule_id: UUID, decision: RuleDecision | str, reviewer: str
+    session: Session,
+    rule_id: UUID,
+    decision: RuleDecision | str,
+    reviewer: str,
+    note: str | None = None,
 ) -> ComplianceRuleRecord:
     """Record a human reviewer's final decision on a pending rule — the only way to approve.
 
     Approve: the rule becomes the version in force and the previously approved version (if
     any) is marked ``superseded_by`` it; approving an older proposal after a newer version was
-    approved raises ``StaleProposalError`` (reject it instead). Reject: permanent. Deciding a
-    rule that is not pending raises ``RuleAlreadyDecidedError``; a blank reviewer or unknown
-    decision raises ``InvalidDecisionError``.
+    approved raises ``StaleProposalError`` (reject it instead). Reject: permanent, and needs a
+    ``note`` saying why. The note (optional for an approval) is stored as ``decision_note``.
+    Deciding a rule that is not pending raises ``RuleAlreadyDecidedError``; a blank reviewer, an
+    unknown decision or a rejection without a reason raises ``InvalidDecisionError``.
     """
     reviewer = reviewer.strip()
     if not reviewer:
@@ -248,6 +271,9 @@ def decide(
         raise RuleAlreadyDecidedError(
             f"{row.rule_key} v{row.version} is already {row.status.value}; decisions are final"
         )
+    note = (note or "").strip() or None
+    if verdict is RuleDecision.REJECT and note is None:
+        raise InvalidDecisionError("a rejection must give a reason")
 
     superseded: ComplianceRule | None = None
     if verdict is RuleDecision.APPROVE:
@@ -264,6 +290,7 @@ def decide(
     row.status = RuleStatus.APPROVED if verdict is RuleDecision.APPROVE else RuleStatus.REJECTED
     row.decided_by = reviewer
     row.decided_at = utcnow()
+    row.decision_note = note
     session.flush()
     record = ComplianceRuleRecord.model_validate(row)
 
@@ -286,9 +313,103 @@ def decide(
             "rule_key": row.rule_key,
             "version": row.version,
             "decision": verdict.value,
+            "note": note,
             "supersedes": None if superseded is None else superseded.id,
         },
     )
     session.flush()
     # Phase 9 hooks in here: an approved rule is embedded into Chroma (never a pending one).
     return record
+
+
+# --------------------------------------------------------------------------- review context
+
+
+def _ist_day(rule: ComplianceRuleRecord, when: str) -> str:
+    moment = rule.decided_at if when == "decided" else rule.created_at
+    return "" if moment is None else moment.astimezone(BUSINESS_TZ).strftime("%d %b %Y")
+
+
+def _history_line(other: ComplianceRuleRecord, proposal: ComplianceRuleRecord) -> str | None:
+    if other.status is RuleStatus.REJECTED:
+        return (
+            f"v{other.version} (proposed {_ist_day(other, 'created')}) was rejected by "
+            f"{other.decided_by} on {_ist_day(other, 'decided')}: \"{other.decision_note or '-'}\""
+        )
+    if other.status is RuleStatus.PENDING and other.version < proposal.version:
+        return (
+            f"v{other.version} (proposed {_ist_day(other, 'created')}) is still pending and is "
+            f"superseded by this proposal — reject v{other.version} as superseded."
+        )
+    if other.status is RuleStatus.PENDING:
+        return (
+            f"A newer proposal, v{other.version} (proposed {_ist_day(other, 'created')}), is "
+            "pending for this rule — this one is probably superseded."
+        )
+    return None
+
+
+def review_context(session: Session, rule_id: UUID) -> ReviewContext:
+    """What a reviewer needs to judge ``rule_id``: the rule in force it would replace, and every
+    other version proposed since that one (pending, or rejected with its reason), as records
+    and as plain-language history lines. Shared by the Compliance page and the review email."""
+    proposal = get_rule(session, rule_id)
+    versions = list_rules(session, rule_key=proposal.rule_key)
+    in_force = next(
+        (v for v in versions if v.status is RuleStatus.APPROVED and v.superseded_by is None), None
+    )
+    since = in_force.version if in_force is not None else 0
+    others = [
+        v
+        for v in versions
+        if v.version > since and v.id != proposal.id and v.status is not RuleStatus.APPROVED
+    ]
+    history = [line for v in others if (line := _history_line(v, proposal)) is not None]
+    return ReviewContext(proposal=proposal, in_force=in_force, others=others, history=history)
+
+
+def _same(rule: ComplianceRuleRecord, section: BulletinSection) -> bool:
+    """Same rule in substance: text equal ignoring whitespace/case, same date and HS codes."""
+    return (
+        bulletin_service.normalize_text(rule.content)
+        == bulletin_service.normalize_text(section.text)
+        and rule.effective_date == section.effective_date
+        and tuple(sorted(rule.hs_codes)) == tuple(sorted(section.hs_codes))
+    )
+
+
+def bulletin_drift(session: Session) -> list[RuleDrift]:
+    """Rules where the latest *scanned* bulletin disagrees with the approved rule in force.
+
+    Compares the scan's view (not the live publication — Option A) with the rulebook, so a
+    change is caught even if it happened before the first scan. Each drift says whether that
+    exact text is already pending or was rejected before. Raises
+    ``BulletinSnapshotNotFoundError`` before the first scan.
+    """
+    sections = bulletin_service.get_latest_sections(session)
+    versions = list_rules(session)
+    drifts = []
+    for section in sections:
+        mine = [v for v in versions if v.rule_key == section.rule_key]
+        in_force = next(
+            (v for v in mine if v.status is RuleStatus.APPROVED and v.superseded_by is None), None
+        )
+        if in_force is not None and _same(in_force, section):
+            continue
+        latest_first = sorted(mine, key=lambda v: -v.version)
+        drifts.append(
+            RuleDrift(
+                rule_key=section.rule_key,
+                section=section,
+                in_force=in_force,
+                pending_same=next(
+                    (v for v in latest_first
+                     if v.status is RuleStatus.PENDING and _same(v, section)), None
+                ),
+                rejected_same=next(
+                    (v for v in latest_first
+                     if v.status is RuleStatus.REJECTED and _same(v, section)), None
+                ),
+            )
+        )  # fmt: skip
+    return drifts
