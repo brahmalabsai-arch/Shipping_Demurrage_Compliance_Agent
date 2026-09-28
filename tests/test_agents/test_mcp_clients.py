@@ -84,6 +84,20 @@ async def test_an_agent_cannot_call_a_server_outside_its_role() -> None:
     assert caught.value.error_type == "ServerNotAllowedError"
 
 
+async def test_an_error_leaving_the_toolbox_is_not_wrapped_in_exception_groups(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """The MCP sessions' task groups would wrap it; callers must be able to catch the type."""
+    with pytest.raises(McpToolError) as caught:
+        async with open_toolbox(["demurrage_rates_mcp", "fx_rates_mcp"], actor="a", run_id="r",
+                                connector=memory_connector) as tools:  # fmt: skip
+            await tools.call("demurrage_rates_mcp", "get_rate",
+                             {"port_code": "XXABC", "container_type": "20ft", "as_of": "2026-09-08"})  # fmt: skip
+
+    assert caught.type is McpToolError
+    assert caught.value.error_type == "PortRateNotFoundError"
+
+
 async def test_stdio_connector_round_trip(
     db_engine: Engine, monkeypatch: pytest.MonkeyPatch
 ) -> None:

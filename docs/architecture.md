@@ -34,7 +34,8 @@ capstone-customs-copilot/
 │   ├── setup_local_db.py             # one-time local role + app DB + test DB creation
 │   ├── seed.py                       # runs every domain seed (the one documented seed command)
 │   ├── seed_shipments.py             # idempotent seed of the 4 fixture shipments
-│   └── seed_port_rates.py            # idempotent seed of INNSA/INMUN demurrage tariffs
+│   ├── seed_port_rates.py            # idempotent seed of INNSA/INMUN demurrage tariffs
+│   └── verify_documents.py           # run the document verification agent (--all / --container)
 ├── alembic/                          # schema migrations
 ├── services/                         # single source of truth — see §4
 │   ├── shipping_service.py
@@ -45,7 +46,8 @@ capstone-customs-copilot/
 │   └── audit_service.py
 ├── models/                           # SQLAlchemy + Pydantic schemas
 │   ├── db_models.py
-│   └── schemas.py
+│   ├── schemas.py
+│   └── currencies.py                 # ISO 4217 codes (the agent's invalid_currency check)
 ├── mcp_servers/
 │   ├── shipping_records_mcp/server.py
 │   ├── demurrage_rates_mcp/server.py
@@ -55,6 +57,8 @@ capstone-customs-copilot/
 │   └── notifications_mcp/server.py
 ├── agents/
 │   ├── state.py                      # shared LangGraph state schema
+│   ├── mcp_clients.py                # open_toolbox: an agent's MCP servers, typed tool calls
+│   ├── guarded_llm.py                # LLM prose guard (no invented numbers) + fallback reason
 │   ├── graph.py                      # top-level StateGraph wiring all agents
 │   ├── regulatory_watch_agent.py
 │   ├── document_verification_agent.py
@@ -95,6 +99,8 @@ All tables live in one PostgreSQL database (`customs_copilot`), separated by sch
 ```
 id                UUID PK
 container_id      TEXT UNIQUE
+container_type    TEXT               -- '20ft','40ft','40hc','20rf','40rf' (CHECK; ContainerType);
+                  -- required: picks the demurrage tariff (added in Phase 7, migration 0007)
 status            ENUM('quoted','booked','in_transit','docked','under_review','cleared','held','closed','cancelled')
                   -- 'cancelled' is terminal; reachable only before docking. Allowed moves:
                   -- services/shipping_service.py::TRANSITIONS
@@ -347,6 +353,31 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
   Until the FastAPI app exists the scheduler runs as its own process
   (`python -m scheduler.watch_scheduler`, or `--once`); the Customs Bulletin page's
   "Run scheduled scan now" fires the same job.
+
+  *As built (Phase 7):* `agents/document_verification_agent.py` is the first node of the
+  shipment pipeline, over `shipping_records_mcp` and `fx_rates_mcp` only. `CaseState`
+  (`agents/state.py`) starts with its inputs (`run_id`, `shipment_id`, `as_of` — the analysis
+  date, "today" in IST for a live run) and this agent's slice: `shipment`, `documents` (current
+  versions only), `fx_context` (`FxContext`: pair, the `ResolvedRate` per lifecycle date —
+  quotation, BoL, commercial invoice — and the quote-window verdict), `document_discrepancies`
+  (`Discrepancy`: code, field, message, every `ObservedValue` with its source document/version,
+  numeric `delta`, raising `agent`), `document_outcome` (`clear`/`flagged`) and
+  `document_explanation`. The checks are deterministic: `missing_document` (invoice, packing list
+  and BoL are required once the goods are on board — `in_transit` and later — and nothing is
+  compared against a missing document), `quantity_mismatch` (documents + the declared qty; all
+  values and the delta, none preferred), `invalid_currency` (not ISO 4217, `models/currencies.py`;
+  never sent to `resolve_rate`), `currency_mismatch`, `value_mismatch` (invoice vs declared,
+  only in a settled currency), `date_mismatch` (invoice/BoL issue date vs the shipment's
+  `invoice_date`/`bol_date`, which lock the FX rates), `fx_rate_unavailable` (a
+  `RateNotFoundError`, never a guess) and `quote_expired` (the quote must be valid on the
+  commercial invoice date, or on the analysis date while the shipment is still `quoted`;
+  otherwise the window is recorded but not judged). A cancelled shipment stops the node with
+  `ShipmentCancelledError` (audited `document_verification.stopped`). The LLM (summary tier)
+  only explains the findings behind the shared number guard (`agents/guarded_llm.py`, also used
+  by the watch agent), is not called for a clear shipment, and falls back to a template. The
+  agent writes no domain data; each run is audited as `document_verification.completed`. Runs
+  from `python -m scripts.verify_documents` or Shipping Ops → "Verify documents"; the Phase 11
+  supervisor wires the node into the pipeline.
 
 **Human-in-the-loop**: implemented with LangGraph's native `interrupt()` inside `supervisor.py` at exactly two points — before `compliance_rulebook_mcp.decide()` is allowed to fire, and before a shipment can transition to `cleared`/filed. Graph state is persisted via `PostgresSaver` (LangGraph checkpointer, same Postgres instance), so an interrupted run survives process restarts and resumes cleanly when a human acts through the dashboard — this reuses the HITL pattern already proven in the delivery control tower project.
 

@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from models.db_models import AuditEvent, Document, Shipment
-from models.enums import ShipmentStatus
+from models.enums import ContainerType, ShipmentStatus
 from models.schemas import ShipmentUpdate
 from scripts.seed_shipments import seed
 from services import shipping_service
@@ -43,6 +43,13 @@ def test_seed_creates_the_four_fixtures_in_their_target_states(
         }
         assert "invoice" not in doc_types["missing_document"]
         assert "invoice" in doc_types["clean"]
+        # One shipment per INNSA tariff row among the docked ones (Phase 8 prices each).
+        assert {k: s.container_type for k, s in by_key.items()} == {
+            "clean": ContainerType.DRY_20,
+            "qty_mismatch": ContainerType.DRY_40,
+            "missing_document": ContainerType.DRY_40,
+            "already_delayed": ContainerType.HIGH_CUBE_40,
+        }
 
 
 def test_seed_is_idempotent_and_preserves_later_edits(

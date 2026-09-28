@@ -34,7 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, ExcludeConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
 
-from models.enums import DocType, LockType, RuleStatus, ShipmentStatus
+from models.enums import ContainerType, DocType, LockType, RuleStatus, ShipmentStatus
 
 # Deterministic constraint names so Alembic autogenerate produces stable, reviewable migrations.
 NAMING_CONVENTION = {
@@ -79,13 +79,25 @@ def _uuid_pk() -> MappedColumn[uuid.UUID]:
 
 
 class Shipment(Base):
-    """A container shipment and its lifecycle dates (architecture §3.1)."""
+    """A container shipment and its lifecycle dates (architecture §3.1).
+
+    One shipment is one container; ``container_type`` (TEXT, a ``ContainerType`` value) picks
+    the port's demurrage tariff for it (Phase 7 addition, migration ``0007``).
+    """
 
     __tablename__ = "shipments"
-    __table_args__ = (UniqueConstraint("container_id"), {"schema": "shipping"})
+    __table_args__ = (
+        UniqueConstraint("container_id"),
+        CheckConstraint(
+            f"container_type IN ({', '.join(repr(t.value) for t in ContainerType)})",
+            name="known_container_type",
+        ),
+        {"schema": "shipping"},
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     container_id: Mapped[str] = mapped_column(Text)
+    container_type: Mapped[str] = mapped_column(Text)
     status: Mapped[ShipmentStatus] = mapped_column(
         _pg_enum(ShipmentStatus, "shipment_status", "shipping")
     )

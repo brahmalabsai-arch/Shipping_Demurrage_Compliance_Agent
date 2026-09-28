@@ -8,13 +8,17 @@ assertions read and write exactly the same data the service layer does.
 from datetime import date
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from streamlit.testing.v1 import AppTest
 
+from agents import document_verification_agent
+from agents.mcp_clients import memory_connector
 from config.settings import PROJECT_ROOT
 from models.db_models import AuditEvent
-from models.enums import DocType, ShipmentStatus
+from models.enums import ContainerType, DocType, ShipmentStatus
+from scripts import seed_fx_rates, seed_shipments
 from services import shipping_service as svc
 from tests.fixtures.shipments import make_shipment
 
@@ -86,6 +90,7 @@ def test_create_shipment_then_attach_document(session_factory: sessionmaker[Sess
     at = _open_page()
     at.text_input(key="new_container").set_value("NEWU1111111")
     at.selectbox(key="new_status").set_value(ShipmentStatus.BOOKED)
+    at.selectbox(key="new_container_type").set_value(ContainerType.HIGH_CUBE_40)
     at.text_input(key="new_cargo_type").set_value("Auto parts - radiators")
     at.text_input(key="new_hs_code").set_value("87089100")
     at.number_input(key="new_qty").set_value(300.0)
@@ -108,5 +113,68 @@ def test_create_shipment_then_attach_document(session_factory: sessionmaker[Sess
     with session_factory() as session:
         created = svc.get_shipment_by_container_id(session, "NEWU1111111")
         assert (created.status, created.declared_value) == (ShipmentStatus.BOOKED, Decimal("45000"))
+        assert created.container_type is ContainerType.HIGH_CUBE_40
         [doc] = svc.get_documents(session, created.id)
         assert (doc.doc_type, doc.qty, doc.currency) == (DocType.PACKING_LIST, Decimal("300"), None)
+
+
+# --------------------------------------------------------------------------- Phase 7
+
+
+def _verify_on_page(monkeypatch: pytest.MonkeyPatch, container_id: str) -> AppTest:
+    """Open the page on a seeded shipment and press "Verify documents" (MCP in memory)."""
+    monkeypatch.setattr(document_verification_agent, "stdio_connector", memory_connector)
+    seed_shipments.seed()
+    seed_fx_rates.seed()
+    at = _open_page()
+    at.selectbox(key="selected_container").set_value(container_id).run()
+    at.button(key=f"verify_{container_id}").click()
+    at.run()
+    assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    return at
+
+
+def test_verify_documents_shows_the_field_level_discrepancy(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    at = _verify_on_page(monkeypatch, "MSCU7002002")
+
+    [warning] = at.warning
+    assert "MSCU7002002: 1 discrepancy(ies) to resolve" in warning.value
+    discrepancies = at.dataframe[2].value
+    assert list(discrepancies["Finding"]) == ["quantity_mismatch"]
+    assert list(discrepancies["Delta"]) == ["40"]
+    rates = at.dataframe[3].value
+    assert list(rates["Stage"]) == ["quotation", "bol", "invoice (commercial)"]
+    with session_factory() as session:
+        run = session.scalars(
+            select(AuditEvent).where(AuditEvent.action == "document_verification.completed")
+        ).one()
+    assert run.actor == document_verification_agent.AGENT
+
+
+def test_verify_documents_on_a_clean_shipment(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    at = _verify_on_page(monkeypatch, "MSKU7001001")
+
+    assert not at.warning
+    assert "nothing to resolve" in at.success[0].value
+
+
+def test_container_type_is_editable_on_the_page(session_factory: sessionmaker[Session]) -> None:
+    _seed(session_factory)
+    at = _open_page()
+    at.selectbox(key="selected_container").set_value(CID).run()
+    assert at.dataframe[0].value.loc[0, "Type"] == "20ft"
+
+    at.selectbox(key=f"edit_container_type_{CID}").set_value(ContainerType.DRY_40)
+    at.button(key=f"save_{CID}").click()
+    at.run()
+
+    assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    with session_factory() as session:
+        stored = svc.get_shipment_by_container_id(session, CID)
+    assert stored.container_type is ContainerType.DRY_40

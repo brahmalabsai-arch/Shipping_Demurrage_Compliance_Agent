@@ -27,20 +27,18 @@ State slice: reads ``WatchState.run_id``; writes every other ``WatchState`` fiel
 """
 
 import difflib
-import re
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import structlog
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import TypeAdapter
 
 from agents.audit import record_run_event
+from agents.guarded_llm import guarded_reply
 from agents.mcp_clients import McpToolbox
 from agents.state import SectionSummary, WatchState
 from models.enums import SectionChangeKind
@@ -71,7 +69,6 @@ SUMMARY_PROMPT = (
     "(duties and surcharges compound, so such arithmetic is easily wrong). No preamble, no "
     "markdown."
 )
-_NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 @dataclass(frozen=True)
@@ -84,16 +81,6 @@ class WatchDeps:
 
 
 # --------------------------------------------------------------------------- summaries
-
-
-def _numbers(text: str) -> set[Decimal]:
-    values = set()
-    for token in _NUMBER.findall(text):
-        try:
-            values.add(Decimal(token.replace(",", "")))
-        except InvalidOperation:  # pragma: no cover - the regex only yields digit groups
-            continue
-    return values
 
 
 def _source_text(change: SectionChange) -> str:
@@ -163,30 +150,10 @@ async def summarize(change: SectionChange, model: BaseChatModel | None) -> Secti
             if s is not None
         ]
     )
-    messages: list[BaseMessage] = [SystemMessage(SUMMARY_PROMPT), HumanMessage(prompt)]
-    allowed = _numbers(_source_text(change))
-    for attempt in (1, 2):
-        try:
-            reply = await model.ainvoke(messages)
-        except Exception as exc:  # any provider failure (quota, network, timeout) -> template
-            return fallback(f"LLM call failed: {type(exc).__name__}")
-        text = " ".join((reply.content if isinstance(reply.content, str) else "").split())
-        if not text:
-            return fallback("LLM returned no text")
-        invented = sorted(_numbers(text) - allowed)
-        if not invented:
-            return SectionSummary(rule_key=change.rule_key, text=text, method="llm")
-        if attempt == 1:
-            listed = ", ".join(str(n) for n in invented)
-            messages += [
-                reply,
-                HumanMessage(
-                    f"Your summary contains {listed}, which appear in neither text — probably a "
-                    "calculation. Rewrite it quoting only figures exactly as written, with no "
-                    "arithmetic."
-                ),
-            ]
-    return fallback(f"LLM summary contained numbers not in the texts (after one retry): {invented}")
+    reply = await guarded_reply(model, SUMMARY_PROMPT, prompt, _source_text(change))
+    if reply.text is None:
+        return fallback(reply.fallback_reason or "LLM reply rejected")
+    return SectionSummary(rule_key=change.rule_key, text=reply.text, method="llm")
 
 
 # --------------------------------------------------------------------------- the node

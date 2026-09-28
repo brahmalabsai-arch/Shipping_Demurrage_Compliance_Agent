@@ -6,12 +6,13 @@ from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models.db_models import AuditEvent
-from models.enums import DocType, ShipmentStatus
-from models.schemas import DocumentAmend, DocumentCreate, ShipmentUpdate
+from models.enums import ContainerType, DocType, ShipmentStatus
+from models.schemas import DocumentAmend, DocumentCreate, ShipmentCreate, ShipmentUpdate
 from services import shipping_service as svc
 from services.errors import (
     DocumentNotFoundError,
@@ -352,3 +353,50 @@ def test_audit_rows_roll_back_with_the_change(db_session: Session) -> None:
     assert db_session.scalar(select(func.count()).select_from(AuditEvent)) == before
     with pytest.raises(ShipmentNotFoundError):
         svc.get_shipment_by_container_id(db_session, "RLBU0000001")
+
+
+# --------------------------------------------------------------------------- container type
+
+
+def test_container_type_is_stored_and_editable_with_audit(db_session: Session) -> None:
+    created = svc.create_shipment(
+        db_session, make_shipment(container_type=ContainerType.HIGH_CUBE_40), ACTOR
+    )
+    assert created.container_type is ContainerType.HIGH_CUBE_40
+
+    updated = svc.update_shipment(
+        db_session, created.id, ShipmentUpdate(container_type=ContainerType.DRY_20), ACTOR
+    )
+
+    assert updated.container_type is ContainerType.DRY_20
+    event = _events(db_session, created.id)[-1]
+    assert event.action == "shipment.updated"
+    assert event.payload["changes"]["container_type"] == {"from": "40hc", "to": "20ft"}
+
+
+@pytest.mark.parametrize("container_type", [None, "45ft"])
+def test_container_type_is_required_and_must_be_a_known_type(container_type: str | None) -> None:
+    """Demurrage is tariffed per container type, so it is never left to an assumption."""
+    fields = make_shipment().model_dump(exclude={"container_type"})
+    if container_type is not None:
+        fields["container_type"] = container_type
+    with pytest.raises(ValidationError, match="container_type"):
+        ShipmentCreate(**fields)
+
+
+def test_container_type_cannot_be_cleared() -> None:
+    with pytest.raises(ValidationError, match="container_type"):
+        ShipmentUpdate(container_type=None)
+
+
+def test_database_rejects_an_unknown_container_type(db_session: Session) -> None:
+    created = svc.create_shipment(db_session, make_shipment(), ACTOR)
+
+    bypassing_the_service = text(
+        "UPDATE shipping.shipments SET container_type = '45ft' WHERE id = :id"
+    )
+    with (
+        pytest.raises(IntegrityError, match="ck_shipments_known_container_type"),
+        db_session.begin_nested(),
+    ):
+        db_session.execute(bypassing_the_service, {"id": created.id})

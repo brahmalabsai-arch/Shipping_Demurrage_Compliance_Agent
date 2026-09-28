@@ -1,4 +1,5 @@
-"""Shipping Ops — create, edit and advance shipments; attach and amend their documents.
+"""Shipping Ops — create, edit and advance shipments; attach and amend their documents; run
+the Document Verification agent on a shipment.
 
 Every read and write goes through ``services.shipping_service`` (the same functions
 ``shipping_records_mcp`` calls), so the dashboard and the agents can never disagree about the
@@ -7,11 +8,14 @@ new versions. Widget keys are suffixed with the container id so switching shipme
 each form from the database.
 """
 
+import asyncio
 from datetime import date, datetime, time
 from typing import Any
 
 import streamlit as st
 
+from agents import document_verification_agent
+from agents.state import CaseState, Discrepancy
 from dashboards.ui import (
     fmt_ist,
     ist_to_utc,
@@ -20,21 +24,24 @@ from dashboards.ui import (
     split_ist,
     to_decimal,
 )
-from models.enums import DocType, ShipmentStatus
+from models.enums import ContainerType, DocType, ShipmentStatus
 from models.schemas import (
     DocumentAmend,
     DocumentCreate,
     DocumentRecord,
+    ResolvedRate,
     ShipmentCreate,
     ShipmentRecord,
     ShipmentUpdate,
 )
 from services import shipping_service as svc
 from services.db import session_scope
+from services.errors import ShipmentCancelledError
 
 st.set_page_config(page_title="Shipping Ops", layout="wide")
 
 # Explicitly typed option lists: inline literals make mypy pick Streamlit's `-> None` overload.
+CONTAINER_TYPES: list[ContainerType] = list(ContainerType)
 DOC_TYPES: list[DocType] = list(DocType)
 START_STATUSES: list[ShipmentStatus] = [ShipmentStatus.QUOTED, ShipmentStatus.BOOKED]
 STATUS_FILTERS: list[str] = ["all", *(s.value for s in ShipmentStatus)]
@@ -46,6 +53,7 @@ STATUS_FILTERS: list[str] = ["all", *(s.value for s in ShipmentStatus)]
 def _shipment_row(s: ShipmentRecord) -> dict[str, Any]:
     return {
         "Container": s.container_id,
+        "Type": s.container_type.value,
         "Status": s.status.value,
         "Cargo": s.cargo_type,
         "HS code": s.hs_code,
@@ -91,6 +99,13 @@ def render_edit_form(s: ShipmentRecord, actor: str) -> None:
         st.subheader(f"Edit {cid}")
         c1, c2, c3 = st.columns(3)
         values: dict[str, Any] = {
+            "container_type": c1.selectbox(
+                "Container type",
+                CONTAINER_TYPES,
+                index=CONTAINER_TYPES.index(s.container_type),
+                format_func=lambda x: x.value,
+                key=f"edit_container_type_{cid}",
+            ),
             "cargo_type": c1.text_input("Cargo type", s.cargo_type, key=f"edit_cargo_type_{cid}"),
             "hs_code": c2.text_input("HS code", s.hs_code, key=f"edit_hs_code_{cid}"),
             "declared_currency": c3.text_input(
@@ -256,6 +271,70 @@ def render_documents(s: ShipmentRecord, actor: str) -> None:
                     )
 
 
+def _discrepancy_row(d: Discrepancy) -> dict[str, Any]:
+    return {
+        "Finding": d.code,
+        "Field": d.field,
+        "Detail": d.message,
+        "Delta": "—" if d.delta is None else str(d.delta),
+    }
+
+
+def _rate_row(r: ResolvedRate) -> dict[str, Any]:
+    return {
+        "Stage": r.stage.value if r.invoice_kind is None else f"{r.stage.value} ({r.invoice_kind})",
+        "Date": r.as_of.isoformat(),
+        "Rate": f"{r.pair} {r.rate}",
+        "Source": r.source.value,
+        "Basis": r.basis,
+        "Valid through": r.expires.isoformat() if r.expires else "—",
+    }
+
+
+def render_verification(s: ShipmentRecord) -> None:
+    """Run the Document Verification agent (over its MCP servers) and show what it found."""
+    cid = s.container_id
+    st.subheader("Document verification")
+    if s.status is ShipmentStatus.CANCELLED:
+        st.caption("Cancelled shipments are not verified.")
+        return
+    st.caption(
+        "Runs the Document Verification agent: cross-checks the current documents with each "
+        "other and the shipment record (quantity, value, currency, dates, missing documents) "
+        "and resolves the FX rate for each lifecycle date. Read-only; the run is audited."
+    )
+    if st.button("Verify documents", key=f"verify_{cid}"):
+        try:
+            with st.spinner("Verifying documents..."):
+                st.session_state[f"verification_{cid}"] = asyncio.run(
+                    document_verification_agent.verify_shipment(s.id)
+                )
+        except ShipmentCancelledError as exc:
+            st.warning(f"Verification stopped: {exc}")
+        except Exception as exc:  # show any failure to the operator
+            st.error(f"Verification failed: {type(exc).__name__}: {exc}")
+    state: CaseState | None = st.session_state.get(f"verification_{cid}")
+    if state is None:
+        return
+    explanation = state.document_explanation
+    summary = explanation.text if explanation else ""
+    heading = f"As of {state.as_of.isoformat()} (run {state.run_id[:8]}): "
+    if state.document_outcome == "clear":
+        st.success(heading + summary)
+    else:
+        st.warning(heading + summary)
+        st.dataframe(
+            [_discrepancy_row(d) for d in state.document_discrepancies],
+            hide_index=True,
+            width="stretch",
+        )
+    fx = state.fx_context
+    if fx is not None and fx.rates:
+        st.dataframe([_rate_row(r) for r in fx.rates], hide_index=True, width="stretch")
+    elif fx is not None and fx.skipped_reason:
+        st.caption(f"FX: {fx.skipped_reason}")
+
+
 def render_create_form(actor: str) -> None:
     with st.form("create_shipment", clear_on_submit=False):
         st.subheader("New shipment")
@@ -267,6 +346,12 @@ def render_create_form(actor: str) -> None:
                 START_STATUSES,
                 format_func=lambda x: x.value,
                 key="new_status",
+            ),
+            "container_type": c1.selectbox(
+                "Container type (prices demurrage)",
+                CONTAINER_TYPES,
+                format_func=lambda x: x.value,
+                key="new_container_type",
             ),
             "cargo_type": c3.text_input("Cargo type", key="new_cargo_type"),
             "hs_code": c1.text_input("HS code (digits)", key="new_hs_code"),
@@ -329,6 +414,7 @@ def render_shipments(actor: str) -> None:
     render_edit_form(shipment, actor)
     render_status_controls(shipment, actor)
     render_documents(shipment, actor)
+    render_verification(shipment)
 
 
 st.title("Shipping Ops")

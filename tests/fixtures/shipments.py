@@ -10,6 +10,10 @@ Each fixture exercises one scenario the agents must tell apart:
 Dates are fixed (not relative to "today") so FX and demurrage lookups in later phases are
 reproducible (problem statement §3, determinism). All ship to INNSA (Nhava Sheva / JNPT) under
 HS heading 8708 (parts and accessories of motor vehicles).
+
+Container types differ on purpose, so demurrage (Phase 8) is exercised on every INNSA tariff
+row: the three docked shipments are a 20ft, a 40ft and a 40ft high-cube; the one still at sea
+is a 40ft (INNSA has no tariff for other types).
 """
 
 from dataclasses import dataclass, field
@@ -17,7 +21,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from models.enums import DocType, ShipmentStatus
+from models.enums import ContainerType, DocType, ShipmentStatus
 from models.schemas import DocumentCreate, ShipmentCreate
 
 S = ShipmentStatus
@@ -49,6 +53,7 @@ CLEAN = FixtureShipment(
     description="Brake assemblies from Shanghai; all documents consistent.",
     shipment=ShipmentCreate(
         container_id="MSKU7001001",
+        container_type=ContainerType.DRY_20,
         cargo_type="Auto parts - brake assemblies",
         hs_code="87083000",
         declared_qty=Decimal("1200"),
@@ -82,6 +87,7 @@ QTY_MISMATCH = FixtureShipment(
     description="Gearboxes from Busan; packing list is 40 units short of the invoice.",
     shipment=ShipmentCreate(
         container_id="MSCU7002002",
+        container_type=ContainerType.DRY_40,
         cargo_type="Auto parts - gearboxes",
         hs_code="87084000",
         declared_qty=Decimal("800"),
@@ -115,6 +121,7 @@ MISSING_DOCUMENT = FixtureShipment(
     description="Steering components from Yokohama; commercial invoice not yet attached.",
     shipment=ShipmentCreate(
         container_id="CMAU7003003",
+        container_type=ContainerType.DRY_40,
         cargo_type="Auto parts - steering columns",
         hs_code="87089400",
         declared_qty=Decimal("450"),
@@ -140,6 +147,7 @@ ALREADY_DELAYED = FixtureShipment(
     description="Suspension parts from Hamburg; docked 2026-09-08 and held at customs.",
     shipment=ShipmentCreate(
         container_id="HLXU7004004",
+        container_type=ContainerType.HIGH_CUBE_40,
         cargo_type="Auto parts - suspension systems",
         hs_code="87088000",
         declared_qty=Decimal("600"),

@@ -116,7 +116,25 @@ async def open_toolbox(
     run_id: str,
     connector: Connector = stdio_connector,
 ) -> AsyncIterator[McpToolbox]:
-    """Connect to ``servers`` (and only those) for one agent run."""
-    async with AsyncExitStack() as stack:
-        sessions = {name: await stack.enter_async_context(connector(name)) for name in servers}
-        yield McpToolbox(sessions, actor=actor, run_id=run_id)
+    """Connect to ``servers`` (and only those) for one agent run.
+
+    An error raised while the toolbox is open reaches the caller as itself (e.g.
+    ``ShipmentCancelledError``), not wrapped in the ``ExceptionGroup`` layers the MCP sessions'
+    task groups add on the way out.
+    """
+    try:
+        async with AsyncExitStack() as stack:
+            sessions = {name: await stack.enter_async_context(connector(name)) for name in servers}
+            yield McpToolbox(sessions, actor=actor, run_id=run_id)
+    except BaseExceptionGroup as group:
+        leaves = _leaves(group)
+        if len(leaves) != 1:
+            raise
+        raise leaves[0] from leaves[0].__cause__
+
+
+def _leaves(group: BaseExceptionGroup[BaseException]) -> list[BaseException]:
+    found: list[BaseException] = []
+    for exc in group.exceptions:
+        found += _leaves(exc) if isinstance(exc, BaseExceptionGroup) else [exc]
+    return found

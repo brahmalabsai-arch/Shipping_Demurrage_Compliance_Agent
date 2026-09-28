@@ -65,6 +65,7 @@ class ShipmentCreate(_Input):
     """A new shipment. It enters the lifecycle as a quotation or a direct booking only."""
 
     container_id: ContainerId
+    container_type: ContainerType  # picks the demurrage tariff; required — never assumed
     status: Literal[ShipmentStatus.QUOTED, ShipmentStatus.BOOKED] = ShipmentStatus.QUOTED
     cargo_type: Annotated[str, Field(min_length=1)]
     hs_code: HsCode
@@ -97,6 +98,7 @@ class ShipmentUpdate(_Input):
     Cross-field rules are re-checked by the service against the merged row.
     """
 
+    container_type: ContainerType | None = None
     cargo_type: Annotated[str, Field(min_length=1)] | None = None
     hs_code: HsCode | None = None
     declared_qty: NonNegativeDecimal | None = None
@@ -112,6 +114,7 @@ class ShipmentUpdate(_Input):
     invoice_date: date | None = None
 
     _REQUIRED: ClassVar[tuple[str, ...]] = (
+        "container_type",
         "cargo_type",
         "hs_code",
         "declared_qty",
@@ -139,6 +142,7 @@ class ShipmentRecord(BaseModel):
 
     id: UUID
     container_id: str
+    container_type: ContainerType
     status: ShipmentStatus
     cargo_type: str
     hs_code: str
