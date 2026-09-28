@@ -14,11 +14,15 @@ from typing import Any
 
 from sqlalchemy import (
     CHAR,
+    BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
     Enum,
     ForeignKey,
+    Identity,
+    Index,
     Integer,
     MetaData,
     Numeric,
@@ -27,10 +31,10 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, ExcludeConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
 
-from models.enums import DocType, LockType, ShipmentStatus
+from models.enums import DocType, LockType, RuleStatus, ShipmentStatus
 
 # Deterministic constraint names so Alembic autogenerate produces stable, reviewable migrations.
 NAMING_CONVENTION = {
@@ -251,6 +255,120 @@ class GazettedRate(Base):
     period_end: Mapped[date] = mapped_column(Date)
     publishing_authority: Mapped[str] = mapped_column(Text)
     revision_of: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("fx.gazetted_rates.id"))
+
+
+# --------------------------------------------------------------------------- bulletin
+
+
+class BulletinPublication(Base):
+    """The simulated external customs bulletin as currently published (one row only).
+
+    Edited from the Customs Bulletin dashboard. The system never reads it directly for change
+    detection: only the scheduled scan copies it into ``snapshots`` (edge cases, Phase 6,
+    Option A). ``singleton`` (always true, unique) keeps the table to a single row.
+    """
+
+    __tablename__ = "publication"
+    __table_args__ = (
+        UniqueConstraint("singleton"),
+        CheckConstraint("singleton", name="single_row"),
+        {"schema": "bulletin"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    singleton: Mapped[bool] = mapped_column(Boolean, default=True, server_default=text("true"))
+    content: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now(), onupdate=utcnow
+    )
+    updated_by: Mapped[str] = mapped_column(Text)
+
+
+class BulletinSnapshot(Base):
+    """What the bulletin said at one scheduled scan (architecture §3.8). Append-only.
+
+    ``seq`` orders snapshots unambiguously even when two scans share a timestamp.
+    """
+
+    __tablename__ = "snapshots"
+    __table_args__ = (UniqueConstraint("seq"), {"schema": "bulletin"})
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(always=True))
+    content: Mapped[str] = mapped_column(Text)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+
+
+class ChangeLogEntry(Base):
+    """A detected difference between two consecutive snapshots (architecture §3.8).
+
+    At most one entry per snapshot pair (unique constraint) — this is what makes detection
+    idempotent. Only ``emailed_at`` may change after insert (trigger in migration ``0004``).
+    """
+
+    __tablename__ = "change_log"
+    __table_args__ = (
+        UniqueConstraint(
+            "prior_snapshot_id", "new_snapshot_id", name="uq_change_log_prior_new_snapshot"
+        ),
+        CheckConstraint("prior_snapshot_id <> new_snapshot_id", name="distinct_snapshots"),
+        {"schema": "bulletin"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    prior_snapshot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bulletin.snapshots.id"))
+    new_snapshot_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("bulletin.snapshots.id"))
+    diff_summary: Mapped[str] = mapped_column(Text)
+    is_substantive: Mapped[bool] = mapped_column(Boolean)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+    emailed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --------------------------------------------------------------------------- compliance
+
+
+class ComplianceRule(Base):
+    """One version of a compliance rule (architecture §3.7).
+
+    Every row is created ``pending``; ``compliance_service.decide`` is the only code path that
+    sets ``approved``/``rejected``. A trigger created in migration ``0004`` enforces the same
+    lifecycle in Postgres: inserts must be pending and undecided, a decision happens once and
+    names its reviewer, only an approved row can be superseded, the rule text never changes and
+    rows are never deleted. At most one approved, unsuperseded version per ``rule_key``.
+    """
+
+    __tablename__ = "rules"
+    __table_args__ = (
+        UniqueConstraint("rule_key", "version", name="uq_rules_rule_key_version"),
+        CheckConstraint("version >= 1", name="positive_version"),
+        Index(
+            "uq_rules_current_approved",
+            "rule_key",
+            unique=True,
+            postgresql_where=text("status = 'approved' AND superseded_by IS NULL"),
+        ),
+        {"schema": "compliance"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    rule_key: Mapped[str] = mapped_column(Text)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[RuleStatus] = mapped_column(_pg_enum(RuleStatus, "rule_status", "compliance"))
+    content: Mapped[str] = mapped_column(Text)
+    hs_codes: Mapped[list[str]] = mapped_column(ARRAY(Text))
+    effective_date: Mapped[date] = mapped_column(Date)
+    change_summary: Mapped[str | None] = mapped_column(Text)
+    superseded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("compliance.rules.id"))
+    source_diff_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("bulletin.change_log.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+    decided_by: Mapped[str | None] = mapped_column(Text)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # --------------------------------------------------------------------------- audit

@@ -193,20 +193,42 @@ status         ENUM('approved','pending','rejected')
 content        TEXT           -- the rule text, embedded into Chroma on approval
 hs_codes       TEXT[]
 effective_date DATE
+change_summary TEXT NULL      -- what changed and why, shown to the reviewer
 superseded_by  UUID NULL FK -> rules.id
 source_diff_id UUID NULL FK -> bulletin.change_log.id
 created_at     TIMESTAMPTZ DEFAULT now()
 decided_by     TEXT NULL      -- human reviewer identifier
 decided_at     TIMESTAMPTZ NULL
+-- UNIQUE (rule_key, version); CHECK version >= 1; hs_codes '{}' = applies to all goods.
+-- UNIQUE INDEX (rule_key) WHERE status='approved' AND superseded_by IS NULL
+--   → at most one version in force per rule.
+-- Trigger compliance.guard_rule(): inserts must be pending + undecided; status changes once,
+--   from pending, together with decided_by/decided_at; only an approved row gets
+--   superseded_by (once); rule text/metadata immutable; no deletes.
+-- Approving vN supersedes the version in force; approving an older proposal after a newer
+--   version was approved raises StaleProposalError. Pending siblings are never touched.
 ```
 
-### 3.8 `bulletin.snapshots` / `bulletin.change_log`
+### 3.8 `bulletin.publication` / `bulletin.snapshots` / `bulletin.change_log`
 ```
-snapshots:  id UUID PK, content TEXT, captured_at TIMESTAMPTZ
-change_log: id UUID PK, prior_snapshot_id UUID, new_snapshot_id UUID,
-            diff_summary TEXT, is_substantive BOOLEAN,
-            detected_at TIMESTAMPTZ, emailed_at TIMESTAMPTZ NULL
+publication: id UUID PK, singleton BOOLEAN UNIQUE CHECK(singleton), content TEXT,
+             updated_at TIMESTAMPTZ, updated_by TEXT
+             -- the live simulated bulletin (single row), edited only by the dashboard;
+             -- publishing never captures a snapshot (Option A, edge_cases.md Phase 6)
+snapshots:   id UUID PK, seq BIGINT IDENTITY UNIQUE, content TEXT, captured_at TIMESTAMPTZ
+             -- captured only by the scheduled scan; append-only (trigger); seq orders them
+change_log:  id UUID PK, prior_snapshot_id UUID FK, new_snapshot_id UUID FK,
+             diff_summary TEXT, is_substantive BOOLEAN,
+             detected_at TIMESTAMPTZ, emailed_at TIMESTAMPTZ NULL
+             -- UNIQUE (prior_snapshot_id, new_snapshot_id) → idempotent detection;
+             -- only emailed_at may be set, once (trigger)
 ```
+Bulletin format: free text, then one section per rule — `## <rule_key>`, then
+`Effective: YYYY-MM-DD` and `HS codes: <codes>|all` lines, then the rule text. Publishing
+validates it. `diff_since_last` compares the two most recent snapshots; a change is
+substantive unless every section (and the text around them) differs only in whitespace/case.
+`bulletin_service.section_changes(change_id)` attributes a change to rule keys
+(added / modified / removed), so the watch agent raises one proposal per changed rule.
 
 ### 3.9 `audit.events` (created in migration `0001`, since every Phase 1 write is audited)
 ```
@@ -243,7 +265,7 @@ Each server is a thin `mcp.server.Server` instance whose tool handlers call stra
 **`compliance_rulebook_mcp`**
 - `search_rules(query: str, hs_code: str | None) -> list[RuleChunk]` (calls the RAG retriever, approved rules only — enforced at the SQL layer with `WHERE status='approved'`, not just at the prompt layer)
 - `list_pending() -> list[Rule]`
-- `propose_change(diff_summary: str, content: str, hs_codes: list[str], source_diff_id: str) -> Rule` (status forced to `pending`)
+- `propose_change(rule_key: str, content: str, hs_codes: list[str], effective_date: date, change_summary: str | None, source_diff_id: str | None) -> Rule` (status forced to `pending`; `rule_key`/`effective_date` added in Phase 4 — a version needs its rule)
 - `decide(rule_id: str, decision: Literal["approve","reject"], reviewer: str) -> Rule` (only path to `approved`)
 
 **`customs_bulletin_mcp`**

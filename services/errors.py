@@ -80,3 +80,45 @@ class OverlappingGazettedPeriodError(CustomsCopilotError):
 
 class InvalidGazettedRevisionError(CustomsCopilotError):
     """A revision must be for the same pair and lie within the period of the row it revises."""
+
+
+# --------------------------------------------------------------------------- compliance (Phase 4)
+
+
+class RuleNotFoundError(CustomsCopilotError):
+    """No compliance rule exists with the given id."""
+
+
+class RuleAlreadyDecidedError(CustomsCopilotError):
+    """Only a pending rule can be decided; approvals and rejections are final."""
+
+
+class StaleProposalError(CustomsCopilotError):
+    """A newer version of the rule is already approved, so this older proposal cannot be."""
+
+
+class DuplicateProposalError(CustomsCopilotError):
+    """The proposal is identical to the approved version or to a pending proposal."""
+
+
+class InvalidDecisionError(CustomsCopilotError):
+    """A decision must name the human reviewer who made it."""
+
+
+class ChangeLogEntryNotFoundError(CustomsCopilotError):
+    """No bulletin change_log entry exists with the given id."""
+
+
+# --------------------------------------------------------------------------- bulletin (Phase 4)
+
+
+class BulletinNotPublishedError(CustomsCopilotError):
+    """The simulated customs bulletin has not been published yet."""
+
+
+class InvalidBulletinError(CustomsCopilotError):
+    """The bulletin text does not follow the section format (see bulletin_service)."""
+
+
+class BulletinSnapshotNotFoundError(CustomsCopilotError):
+    """No scan has captured a bulletin snapshot yet."""

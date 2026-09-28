@@ -19,6 +19,8 @@ from models.enums import (
     InvoiceKind,
     LockType,
     RateSource,
+    RuleStatus,
+    SectionChangeKind,
     ShipmentStatus,
 )
 
@@ -360,3 +362,123 @@ class ResolvedRate(BaseModel):
     locked: bool
     expires: date | None = None
     invoice_kind: InvoiceKind | None = None
+
+
+# --------------------------------------------------------------------------- compliance
+
+# Stable identifier of a rule across versions, e.g. 'HSN-8708-duty'.
+RuleKey = Annotated[str, Field(pattern=r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$", max_length=80)]
+
+
+class RuleProposal(_Input):
+    """A proposed new version of a compliance rule. It is always stored ``pending``.
+
+    ``hs_codes`` empty means the rule applies to every HS code. ``source_diff_id`` links a
+    proposal raised from a detected bulletin change to its ``bulletin.change_log`` entry.
+    """
+
+    rule_key: RuleKey
+    content: Annotated[str, Field(min_length=1)]
+    hs_codes: list[HsCode] = Field(default_factory=list)
+    effective_date: date
+    change_summary: str | None = None
+    source_diff_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _normalise(self) -> Self:
+        self.hs_codes = sorted(set(self.hs_codes))
+        if self.change_summary is not None and not self.change_summary:
+            self.change_summary = None
+        return self
+
+
+class ComplianceRuleRecord(BaseModel):
+    """A compliance rule version as returned across the service boundary."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    rule_key: str
+    version: int
+    status: RuleStatus
+    content: str
+    hs_codes: list[str]
+    effective_date: date
+    change_summary: str | None
+    superseded_by: UUID | None
+    source_diff_id: UUID | None
+    created_at: datetime
+    decided_by: str | None
+    decided_at: datetime | None
+
+    def applies_to(self, hs_code: str) -> bool:
+        """True if the rule covers ``hs_code`` — a heading covers its sub-headings and vice
+        versa; a rule with no HS codes applies to all goods."""
+        return not self.hs_codes or any(
+            hs_code.startswith(code) or code.startswith(hs_code) for code in self.hs_codes
+        )
+
+
+# --------------------------------------------------------------------------- bulletin
+
+
+class BulletinPublicationRecord(BaseModel):
+    """The simulated customs bulletin as currently published."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    content: str
+    updated_at: datetime
+    updated_by: str
+
+
+class BulletinSnapshotRecord(BaseModel):
+    """The bulletin text as captured by one scheduled scan."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    seq: int
+    content: str
+    captured_at: datetime
+
+
+class ChangeLogEntryRecord(BaseModel):
+    """A detected change between two consecutive snapshots."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    prior_snapshot_id: UUID
+    new_snapshot_id: UUID
+    diff_summary: str
+    is_substantive: bool
+    detected_at: datetime
+    emailed_at: datetime | None
+
+
+class BulletinSection(BaseModel):
+    """One rule section of the bulletin: ``## <rule_key>``, its metadata lines and its text."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rule_key: str
+    effective_date: date
+    hs_codes: tuple[str, ...]
+    text: str
+
+
+class SectionChange(BaseModel):
+    """How one rule section differs between two bulletin versions.
+
+    ``is_substantive`` is False when only whitespace or letter case changed.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    rule_key: str
+    kind: SectionChangeKind
+    before: BulletinSection | None
+    after: BulletinSection | None
+    is_substantive: bool

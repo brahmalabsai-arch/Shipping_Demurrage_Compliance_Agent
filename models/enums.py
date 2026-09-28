@@ -71,3 +71,27 @@ class RateSource(StrEnum):
     SPOT = "spot"
     LOCKED = "locked"
     GAZETTED = "gazetted"
+
+
+class RuleStatus(StrEnum):
+    """Compliance rule review state. Every rule is created ``pending``; only an explicit human
+    decision (``compliance_service.decide``) moves it, once, to ``approved`` or ``rejected``."""
+
+    APPROVED = "approved"
+    PENDING = "pending"
+    REJECTED = "rejected"
+
+
+class RuleDecision(StrEnum):
+    """A reviewer's verdict on a pending compliance rule."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
+class SectionChangeKind(StrEnum):
+    """How one rule section of the customs bulletin changed between two snapshots."""
+
+    ADDED = "added"
+    MODIFIED = "modified"
+    REMOVED = "removed"
