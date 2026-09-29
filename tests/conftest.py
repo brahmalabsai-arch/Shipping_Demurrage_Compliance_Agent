@@ -11,6 +11,7 @@ Database tests run against the disposable ``POSTGRES_TEST_DB`` (never the app da
 Any test using these fixtures is auto-marked ``db`` (CI runs it in the Postgres job).
 """
 
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -18,8 +19,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
-from sqlalchemy import Connection, Engine, create_engine, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import Connection, Engine, create_engine, event, text
+from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
 from config.settings import PROJECT_ROOT, get_settings
 from models.db_models import DOMAIN_SCHEMAS
@@ -106,10 +107,28 @@ def session_factory(
     db_connection: Connection, monkeypatch: pytest.MonkeyPatch
 ) -> sessionmaker[Session]:
     """Sessions bound to the rolled-back test connection; also installed as the factory behind
-    ``services.db.session_scope`` so dashboards and scripts under test hit the same transaction."""
+    ``services.db.session_scope`` so dashboards and scripts under test hit the same transaction.
+
+    All sessions share ONE connection (each is a SAVEPOINT on it), but the pipeline's parallel
+    branches run MCP tools on several worker threads at once — interleaved savepoints on one
+    connection fail ("savepoint does not exist"). So a session's outermost transaction holds a
+    re-entrant lock until it ends: one test transaction at a time, across threads. (Production
+    sessions each get their own pooled connection and need no such lock.)"""
     factory = sessionmaker(
         bind=db_connection, join_transaction_mode="create_savepoint", expire_on_commit=False
     )
+    lock = threading.RLock()
+
+    @event.listens_for(factory, "after_transaction_create")
+    def _hold_connection(session: Session, transaction: SessionTransaction) -> None:
+        if transaction.parent is None:
+            lock.acquire()
+
+    @event.listens_for(factory, "after_transaction_end")
+    def _release_connection(session: Session, transaction: SessionTransaction) -> None:
+        if transaction.parent is None:
+            lock.release()
+
     monkeypatch.setattr(db_module, "get_session_factory", lambda: factory)
     return factory
 
