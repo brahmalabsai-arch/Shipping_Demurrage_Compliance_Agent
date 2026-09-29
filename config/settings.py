@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     # Regulatory Watch scheduler (Phase 6)
     watch_scan_interval_minutes: int = 15
 
+    # Shipment pipeline (Phase 10): an upstream agent that has not finished after this many
+    # seconds is recorded as timed out and the checklist is built without it. Generous: the
+    # compliance branch waits ~25 s for its models plus several LLM calls.
+    agent_timeout_seconds: float = 600.0
+
     # LLMs via LangChain. Two tiers per provider: reasoning (agent reasoning) and summary
     # (short plain-language text). Without the chosen provider's key, agents fall back to
     # deterministic output.

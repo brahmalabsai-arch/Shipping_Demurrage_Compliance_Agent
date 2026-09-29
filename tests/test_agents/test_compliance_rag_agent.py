@@ -190,7 +190,7 @@ async def test_pipeline_answers_the_shipment_questions_with_citations(
         actions = set(session.scalars(
             select(AuditEvent.action).where(AuditEvent.entity_id == UUID(state.run_id))))  # fmt: skip
     assert actions == {"document_verification.completed", "demurrage_risk.completed",
-                       "compliance_rag.completed"}  # fmt: skip
+                       "compliance_rag.completed", "clearance_checklist.completed"}  # fmt: skip
 
 
 def test_shipment_questions_are_fixed_and_follow_the_findings() -> None:

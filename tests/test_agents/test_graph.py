@@ -1,5 +1,5 @@
-"""The shipment pipeline so far: document verification → (demurrage & risk ‖ compliance) on one
-CaseState. (No rulebook is seeded here: the compliance branch runs and finds nothing.)"""
+"""The shipment pipeline: document verification → (demurrage & risk ‖ compliance) → clearance
+checklist, on one CaseState. (No rulebook is seeded here: the compliance branch finds nothing.)"""
 
 from datetime import date
 from decimal import Decimal
@@ -60,10 +60,11 @@ async def test_pipeline_fills_both_slices_and_risk_sees_the_discrepancies(
             select(AuditEvent).where(AuditEvent.entity_type == "agent_run")
             .order_by(AuditEvent.created_at)
         ).all()  # fmt: skip
-    # verification first; then risk and compliance (parallel branches, either order)
+    # verification first; then risk and compliance (parallel, either order); checklist last
     assert events[0].action == "document_verification.completed"
-    assert {e.action for e in events[1:]} == {"demurrage_risk.completed",
-                                               "compliance_rag.completed"}  # fmt: skip
+    assert {e.action for e in events[1:3]} == {"demurrage_risk.completed",
+                                                "compliance_rag.completed"}  # fmt: skip
+    assert events[3].action == "clearance_checklist.completed"
     assert {e.entity_id for e in events} == {UUID(state.run_id)}
 
 

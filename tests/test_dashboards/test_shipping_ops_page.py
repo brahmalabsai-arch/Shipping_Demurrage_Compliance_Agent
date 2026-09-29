@@ -18,7 +18,7 @@ from agents.mcp_clients import memory_connector
 from config.settings import PROJECT_ROOT
 from models.db_models import AuditEvent
 from models.enums import ContainerType, DocType, ShipmentStatus
-from scripts import seed_fx_rates, seed_port_rates, seed_shipments
+from scripts import seed_compliance, seed_fx_rates, seed_port_rates, seed_shipments
 from services import shipping_service as svc
 from tests.fixtures.shipments import make_shipment
 
@@ -206,3 +206,34 @@ def test_assess_demurrage_risk_shows_the_estimate_and_risk(
     assert metrics["Chargeable days"] == "16"
     assert metrics["Demurrage (USD)"] == "1,600.00"
     assert metrics["Demurrage (INR)"] == "141,440.00"
+    # Phase 10: documents are clean, so the checklist is ready despite the (urgent) demurrage
+    [ready] = at.success
+    assert ready.value.startswith("HLXU7004004: 0 blocker(s)")
+    assert ready.value.endswith("ready for clearance.")
+    items = at.dataframe[-1].value
+    assert "demurrage risk high" in set(items["Item"])
+
+
+def test_analysis_checklist_lists_the_blocking_discrepancy_with_guidance(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(graph, "stdio_connector", memory_connector)
+    monkeypatch.setattr(graph, "today_ist", lambda: date(2026, 9, 28))
+    seed_shipments.seed()
+    seed_port_rates.seed()
+    seed_fx_rates.seed()
+    seed_compliance.seed()
+    at = _open_page()
+    at.selectbox(key="selected_container").set_value("MSCU7002002").run()
+
+    at.button(key="assess_MSCU7002002").click()
+    at.run()
+
+    assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    assert any(i.value.endswith("not ready for clearance.") for i in at.info)
+    items = at.dataframe[-1].value
+    first = items.iloc[0]
+    assert (first["Severity"], first["Item"]) == ("blocker", "quantity mismatch")
+    assert first["Raised by"] == "document_verification_agent"
+    assert "DOC-quantity-consistency v1" in first["References"]

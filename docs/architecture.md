@@ -431,6 +431,23 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
   re-implements RAGAS context precision/recall with a Groq judge (the `ragas` package would
   downgrade openai/langchain-openai) — 1.0 / 1.0 on 2026-09-29.
 
+  *As built (Phase 10):* `agents/clearance_checklist_agent.py` is the fan-in
+  (`graph.add_edge([risk, compliance], checklist)`): a pure function of `CaseState` (no MCP,
+  no LLM) producing `Checklist(items, missing_inputs, conflicts, ready_for_clearance,
+  summary)`. Each document discrepancy → one `ChecklistItem` (severity `blocker` for missing
+  documents and quantity/value/currency problems, `action` for dates, an expired quote, a
+  missing FX rate) with the compliance answer to its question attached as `guidance`; the
+  risk → one item (`action` if high/medium); each data gap → a `blocker`; other compliance
+  findings → `info` (incl. "not found"). Every item names its `source_agent`; items are
+  de-duplicated by a stable `key`. `graph.guarded` wraps each upstream agent: an exception or
+  a timeout (`AGENT_TIMEOUT_SECONDS`, default 600) becomes an `AgentFailure` in
+  `CaseState.agent_failures` (reducer: list append, for the parallel branches) plus an
+  `agent.failed` audit event, and the checklist lists it in `missing_inputs`;
+  `ShipmentCancelledError` still stops the run. Documents that block clearance while the risk
+  agent says low/none → a `Conflict` with both signals. `ready_for_clearance` = no blocker, no
+  missing input, no conflict (Phase 11's filing gate enforces it). Audited
+  `clearance_checklist.completed`. Shipping Ops → "Analyse shipment" shows risk + checklist.
+
 **Human-in-the-loop**: implemented with LangGraph's native `interrupt()` inside `supervisor.py` at exactly two points — before `compliance_rulebook_mcp.decide()` is allowed to fire, and before a shipment can transition to `cleared`/filed. Graph state is persisted via `PostgresSaver` (LangGraph checkpointer, same Postgres instance), so an interrupted run survives process restarts and resumes cleanly when a human acts through the dashboard — this reuses the HITL pattern already proven in the delivery control tower project.
 
 ## 7. Gmail integration (OAuth)

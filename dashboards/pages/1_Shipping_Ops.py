@@ -15,7 +15,7 @@ from typing import Any
 import streamlit as st
 
 from agents import document_verification_agent, graph
-from agents.state import CaseState, Discrepancy
+from agents.state import CaseState, ChecklistItem, Discrepancy
 from dashboards.ui import (
     fmt_ist,
     ist_to_utc,
@@ -356,29 +356,62 @@ def _show_risk(state: CaseState) -> None:
         st.warning(f"Data gap — {gap}")
 
 
+def _item_row(item: ChecklistItem) -> dict[str, Any]:
+    return {
+        "Severity": item.severity,
+        "Category": item.category,
+        "Item": item.title,
+        "Detail": item.detail,
+        "Rulebook guidance": item.guidance or "",
+        "References": ", ".join(item.references),
+        "Raised by": item.source_agent,
+    }
+
+
+def _show_checklist(state: CaseState) -> None:
+    checklist = state.checklist
+    if checklist is None:
+        return
+    st.markdown("**Clearance checklist**")
+    if checklist.ready_for_clearance:
+        st.success(checklist.summary)
+    else:
+        st.info(checklist.summary)
+    for missing in checklist.missing_inputs:
+        failure = next((f for f in state.agent_failures if f.agent.startswith(missing)), None)
+        reason = f" ({failure.kind}: {failure.error})" if failure else ""
+        st.warning(f"Missing input — {missing}{reason}; the checklist is built without it.")
+    for conflict in checklist.conflicts:
+        st.warning(f"Conflict — {conflict.description} " + " | ".join(conflict.signals))
+    st.dataframe([_item_row(i) for i in checklist.items], hide_index=True, width="stretch")
+
+
 def render_risk(s: ShipmentRecord) -> None:
-    """Run the pipeline (document verification → demurrage & risk) and show the risk slice."""
+    """Run the whole pipeline and show the risk and the clearance checklist."""
     cid = s.container_id
-    st.subheader("Demurrage & risk")
+    st.subheader("Shipment analysis — demurrage, risk and clearance checklist")
     if s.status is ShipmentStatus.CANCELLED:
         st.caption("Cancelled shipments are not assessed.")
         return
     st.caption(
-        "Runs document verification, then the Demurrage & Risk agent: the tariff in force on "
-        "the arrival day (arrival day = day 1), converted at the gazetted rate on today's date, "
-        "and a risk level that also weighs any document discrepancies. Read-only; audited."
+        "Runs every agent: document verification; then, in parallel, demurrage & risk (the "
+        "tariff in force on the arrival day, arrival day = day 1, converted at the gazetted rate "
+        "on today's date) and the compliance agent (questions to the approved rulebook); then "
+        "the clearance checklist that combines them. Read-only; audited. Takes ~30 s or more "
+        "(the rulebook models load, then LLM calls)."
     )
-    if st.button("Assess demurrage risk", key=f"assess_{cid}"):
+    if st.button("Analyse shipment", key=f"assess_{cid}"):
         try:
-            with st.spinner("Assessing demurrage and risk..."):
+            with st.spinner("Running the agents..."):
                 st.session_state[f"risk_{cid}"] = asyncio.run(graph.analyse_shipment(s.id))
         except ShipmentCancelledError as exc:
-            st.warning(f"Assessment stopped: {exc}")
+            st.warning(f"Analysis stopped: {exc}")
         except Exception as exc:  # show any failure to the operator
-            st.error(f"Assessment failed: {type(exc).__name__}: {exc}")
+            st.error(f"Analysis failed: {type(exc).__name__}: {exc}")
     state: CaseState | None = st.session_state.get(f"risk_{cid}")
     if state is not None:
         _show_risk(state)
+        _show_checklist(state)
 
 
 def render_create_form(actor: str) -> None:

@@ -6,9 +6,10 @@ pipeline adds its own slice as it is built (Phase 7: document verification; Phas
 and risk).
 """
 
+import operator
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -168,6 +169,54 @@ class ComplianceFinding(BaseModel):
     agent: str
 
 
+Severity = Literal[
+    "blocker",  # must be resolved before the shipment can be cleared
+    "action",  # needs someone to act (urgency, a correction), but does not block clearance
+    "info",  # context for the reviewer
+]
+
+
+class ChecklistItem(BaseModel):
+    """One thing the clearance reviewer must see, attributed to the agent that raised it."""
+
+    key: str  # stable identity — items are de-duplicated by it
+    source_agent: str
+    category: Literal["document", "demurrage", "data_gap", "compliance"]
+    severity: Severity
+    title: str
+    detail: str
+    guidance: str | None = None  # the rulebook's answer for this item, if one was asked
+    references: list[str] = Field(default_factory=list)  # rule citations, tariff / FX rows
+
+
+class Conflict(BaseModel):
+    """Upstream agents disagree about urgency; both signals are kept, neither is picked."""
+
+    description: str
+    signals: list[str]  # "<agent>: <what it reported>"
+
+
+class AgentFailure(BaseModel):
+    """An upstream agent that raised or timed out; the pipeline carried on without it."""
+
+    agent: str
+    kind: Literal["error", "timeout"]
+    error: str
+
+
+class Checklist(BaseModel):
+    """The clearance checklist for one shipment (Phase 10 fan-in)."""
+
+    shipment_id: UUID
+    container_id: str | None
+    as_of: date
+    items: list[ChecklistItem]  # blockers first
+    missing_inputs: list[str] = Field(default_factory=list)  # e.g. ["demurrage_risk"]
+    conflicts: list[Conflict] = Field(default_factory=list)
+    ready_for_clearance: bool  # no blocker, no missing input, no conflict
+    summary: str
+
+
 class CaseState(BaseModel):
     """What the shipment pipeline knows about one shipment (architecture §6).
 
@@ -177,7 +226,9 @@ class CaseState(BaseModel):
     ``document_explanation``. Demurrage & risk (Phase 8) reads ``document_discrepancies`` (if
     verification ran first) and writes ``demurrage_estimate``, ``risk``, ``risk_reasons`` and
     ``data_gaps``. Compliance RAG (Phase 9) reads ``shipment`` and ``document_discrepancies``
-    (from verification) and writes ``compliance_findings``.
+    (from verification) and writes ``compliance_findings``. The clearance checklist (Phase 10)
+    reads all of the above plus ``agent_failures`` (written by the graph when an upstream agent
+    raises or times out) and writes ``checklist``.
     """
 
     run_id: str
@@ -194,3 +245,6 @@ class CaseState(BaseModel):
     risk_reasons: list[str] = Field(default_factory=list)
     data_gaps: list[str] = Field(default_factory=list)  # what could not be resolved, and why
     compliance_findings: list[ComplianceFinding] = Field(default_factory=list)
+    # Written by the graph's guard around each upstream agent; parallel branches append.
+    agent_failures: Annotated[list[AgentFailure], operator.add] = Field(default_factory=list)
+    checklist: Checklist | None = None

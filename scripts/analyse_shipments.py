@@ -1,5 +1,5 @@
-"""Run the shipment pipeline (document verification → demurrage & risk and compliance) and print
-the results.
+"""Run the shipment pipeline (document verification → demurrage & risk and compliance →
+clearance checklist) and print the results.
 
 The agents talk to their MCP servers as stdio subprocesses, exactly as in production; this
 script only looks up which shipments to analyse.
@@ -21,7 +21,7 @@ from services.errors import ShipmentCancelledError
 
 SLICE = {
     "run_id", "as_of", "document_outcome", "document_discrepancies", "risk", "risk_reasons",
-    "data_gaps", "demurrage_estimate", "compliance_findings",
+    "data_gaps", "demurrage_estimate", "compliance_findings", "agent_failures", "checklist",
 }  # fmt: skip
 
 
