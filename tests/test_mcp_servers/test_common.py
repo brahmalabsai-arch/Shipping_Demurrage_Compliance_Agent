@@ -253,8 +253,13 @@ async def test_server_runs_over_stdio(name: str) -> None:
         command=sys.executable,
         args=["-m", f"mcp_servers.{name}.server"],
         cwd=str(PROJECT_ROOT),
-        # listing tools never touches the database; CI's unit job has no .env
-        env={**os.environ, "POSTGRES_PASSWORD": os.environ.get("POSTGRES_PASSWORD", "unused")},
+        # listing tools never touches the database; CI's unit job has no .env; and it needs
+        # no retrieval models (compliance_rulebook_mcp would otherwise load them at startup)
+        env={
+            **os.environ,
+            "POSTGRES_PASSWORD": os.environ.get("POSTGRES_PASSWORD", "unused"),
+            "RAG_PRELOAD_MODELS": "false",
+        },
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as client:
         init = await client.initialize()

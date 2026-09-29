@@ -5,6 +5,7 @@ SQLAlchemy ``<Noun>`` ORM classes (conventions §2). Input models (``*Create`` /
 validate at the boundary so bad data never reaches the service layer.
 """
 
+from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, ClassVar, Literal, Self
@@ -419,11 +420,17 @@ class ComplianceRuleRecord(BaseModel):
     decision_note: str | None
 
     def applies_to(self, hs_code: str) -> bool:
-        """True if the rule covers ``hs_code`` — a heading covers its sub-headings and vice
-        versa; a rule with no HS codes applies to all goods."""
-        return not self.hs_codes or any(
-            hs_code.startswith(code) or code.startswith(hs_code) for code in self.hs_codes
-        )
+        """True if the rule covers ``hs_code`` (see :func:`hs_codes_cover`)."""
+        return hs_codes_cover(self.hs_codes, hs_code)
+
+
+def hs_codes_cover(rule_codes: Sequence[str], hs_code: str) -> bool:
+    """True if a rule with ``rule_codes`` covers ``hs_code`` — a heading covers its sub-headings
+    and vice versa; a rule with no HS codes applies to all goods. Shared by the rulebook reads
+    and the RAG index filter, so both always agree."""
+    return not rule_codes or any(
+        hs_code.startswith(code) or code.startswith(hs_code) for code in rule_codes
+    )
 
 
 # --------------------------------------------------------------------------- bulletin

@@ -54,7 +54,7 @@ async def test_search_finds_the_relevant_approved_rule(seeded: None) -> None:
             "search_rules", {"query": "Korean certificate of origin", "hs_code": "87084000"}))["result"]  # fmt: skip
 
     assert matches[0]["rule"]["rule_key"] == "ORG-KR-CEPA"
-    assert {m["method"] for m in matches} == {"keyword"}
+    assert {m["method"] for m in matches} == {"hybrid"}
     assert all(m["rule"]["status"] == "approved" for m in matches)
 
 

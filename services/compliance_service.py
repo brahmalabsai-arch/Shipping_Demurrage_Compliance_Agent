@@ -11,6 +11,9 @@ and the agents. Governance guarantees (problem statement FR6/FR7):
   proposals of the same key are never touched by another proposal's decision, and an older
   proposal can no longer be approved once a newer version is (``StaleProposalError``).
 
+An approval is embedded into the RAG index only after its transaction commits (never a
+pending or rejected version); ``search_rules`` retrieves from that index (Phase 9).
+
 A trigger (migrations ``0004``/``0006``) enforces the same lifecycle in Postgres. Rule versions
 are never edited or deleted: a change is a new version, and history is the chain of
 ``superseded_by``.
@@ -22,12 +25,12 @@ plus the history in between (other proposals — still pending, or rejected and 
 force.
 """
 
-import re
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+import structlog
+from sqlalchemy import event, select
+from sqlalchemy.orm import Session, SessionTransaction
 
 from models.db_models import ChangeLogEntry, ComplianceRule, utcnow
 from models.enums import RuleDecision, RuleStatus
@@ -39,7 +42,9 @@ from models.schemas import (
     RuleMatch,
     RuleProposal,
 )
+from rag import ingest, retriever
 from services import audit_service, bulletin_service
+from services.db import session_scope
 from services.errors import (
     ChangeLogEntryNotFoundError,
     DuplicateProposalError,
@@ -50,6 +55,8 @@ from services.errors import (
 )
 
 BUSINESS_TZ = ZoneInfo("Asia/Kolkata")  # dates in review history are the reviewer's (IST) days
+
+logger = structlog.get_logger("services")
 
 # --------------------------------------------------------------------------- reads
 
@@ -102,61 +109,66 @@ def list_rules(
     return [ComplianceRuleRecord.model_validate(row) for row in session.scalars(query)]
 
 
-_WORD = re.compile(r"[a-z0-9]+")
-_STOPWORDS = frozenset(
-    [
-        "a",
-        "an",
-        "and",
-        "are",
-        "as",
-        "at",
-        "be",
-        "by",
-        "for",
-        "from",
-        "how",
-        "in",
-        "is",
-        "it",
-        "of",
-        "on",
-        "or",
-        "the",
-        "to",
-        "what",
-        "when",
-        "which",
-        "with",
-    ]
-)
-
-
-def _terms(text: str) -> set[str]:
-    return {w for w in _WORD.findall(text.lower()) if len(w) > 2 and w not in _STOPWORDS}
-
-
 def search_rules(
     session: Session, query: str, hs_code: str | None = None, limit: int = 5
 ) -> list[RuleMatch]:
-    """Approved rules relevant to ``query`` (optionally only those covering ``hs_code``).
+    """Approved rules in force that answer ``query`` (optionally only those covering
+    ``hs_code``), most relevant first — possibly none.
 
-    Interim keyword retriever: score = share of the query's terms found in the rule key and
-    text; rules with no overlap are dropped. Phase 9 replaces the scoring with the hybrid
-    BM25 + dense + rerank retriever behind this same function. Only ever searches
-    ``list_approved`` (``status='approved'`` in SQL) — pending or rejected text is never a
-    candidate.
+    Hybrid retrieval (``rag.retriever``: BM25 + BGE dense → RRF → cross-encoder rerank) over
+    the RAG index, which only ever holds approved versions in force. Every hit is re-read from
+    Postgres and dropped unless it is still approved and in force, so a stale index entry can
+    never surface a superseded, pending or rejected text. ``score`` is the reranker's.
     """
-    wanted = _terms(query)
-    if not wanted:
-        return []
     matches = []
-    for rule in list_approved(session, hs_code):
-        found = wanted & _terms(f"{rule.rule_key.replace('-', ' ')} {rule.content}")
-        if found:
-            matches.append(RuleMatch(rule=rule, score=len(found) / len(wanted), method="keyword"))
-    matches.sort(key=lambda m: (-m.score, m.rule.rule_key))
-    return matches[:limit]
+    for hit in retriever.search(query, hs_code, limit):
+        try:
+            rule = get_rule(session, hit.rule_id)
+        except RuleNotFoundError:
+            rule = None
+        if rule is None or rule.status is not RuleStatus.APPROVED or rule.superseded_by:
+            logger.warning("rag.stale_hit", rule_key=hit.rule_key, version=hit.version)
+            continue
+        matches.append(RuleMatch(rule=rule, score=hit.score, method="hybrid"))
+    return matches
+
+
+def sync_rag_index(session: Session) -> ingest.SyncReport:
+    """Rebuild the RAG index as exactly the rulebook in force (backfill / repair)."""
+    return ingest.sync_index(list_approved(session))
+
+
+# The index is not transactional with Postgres: an approval is embedded only once its
+# transaction has committed, from a fresh read of the rule (still approved and in force).
+_TO_INDEX = "compliance_rules_to_index"
+_HOOKED = "compliance_rag_hooks"
+
+
+def _index_after_commit(session: Session, rule_id: UUID) -> None:
+    session.info.setdefault(_TO_INDEX, []).append(rule_id)
+    if session.info.get(_HOOKED):
+        return
+    session.info[_HOOKED] = True
+    event.listen(session, "after_commit", _index_committed)
+    event.listen(session, "after_soft_rollback", _forget_on_rollback)
+
+
+def _forget_on_rollback(session: Session, previous_transaction: SessionTransaction) -> None:
+    if not previous_transaction.nested:  # a failed savepoint inside decide's transaction is not
+        session.info.pop(_TO_INDEX, None)  # a rollback of the approval itself
+
+
+def _index_committed(session: Session) -> None:
+    rule_ids = session.info.pop(_TO_INDEX, [])
+    if not rule_ids:
+        return
+    try:
+        with session_scope() as fresh:
+            rules = [get_rule(fresh, rule_id) for rule_id in rule_ids]
+        in_force = [r for r in rules if r.status is RuleStatus.APPROVED and not r.superseded_by]
+        ingest.index_rules(in_force)
+    except Exception:  # never undo a committed decision; `scripts.index_rulebook` repairs
+        logger.exception("rag.index_failed", rule_ids=[str(i) for i in rule_ids])
 
 
 def get_current_rule(session: Session, rule_key: str) -> ComplianceRuleRecord:
@@ -318,7 +330,8 @@ def decide(
         },
     )
     session.flush()
-    # Phase 9 hooks in here: an approved rule is embedded into Chroma (never a pending one).
+    if record.status is RuleStatus.APPROVED:  # embedded after commit; a rejection never is
+        _index_after_commit(session, record.id)
     return record
 
 

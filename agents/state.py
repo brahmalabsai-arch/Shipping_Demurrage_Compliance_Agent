@@ -141,6 +141,33 @@ class DemurrageEstimate(BaseModel):
     basis: str  # the computation, in words
 
 
+class Citation(BaseModel):
+    """An approved rule version an answer relies on, as retrieved (reranker ``score``)."""
+
+    rule_id: UUID
+    rule_key: str
+    version: int
+    effective_date: date
+    score: float
+
+
+class ComplianceFinding(BaseModel):
+    """One question put to the approved rulebook, and its grounded answer.
+
+    ``found=False`` means the rulebook in force does not answer it — the answer is then exactly
+    "Not found in current rulebook." and nothing is guessed.
+    """
+
+    question: str
+    hs_code: str | None = None
+    found: bool
+    answer: str
+    citations: list[Citation] = Field(default_factory=list)
+    method: Literal["llm", "template"]
+    fallback_reason: str | None = None
+    agent: str
+
+
 class CaseState(BaseModel):
     """What the shipment pipeline knows about one shipment (architecture §6).
 
@@ -149,7 +176,8 @@ class CaseState(BaseModel):
     ``documents``, ``fx_context``, ``document_discrepancies``, ``document_outcome`` and
     ``document_explanation``. Demurrage & risk (Phase 8) reads ``document_discrepancies`` (if
     verification ran first) and writes ``demurrage_estimate``, ``risk``, ``risk_reasons`` and
-    ``data_gaps``.
+    ``data_gaps``. Compliance RAG (Phase 9) reads ``shipment`` and ``document_discrepancies``
+    (from verification) and writes ``compliance_findings``.
     """
 
     run_id: str
@@ -165,3 +193,4 @@ class CaseState(BaseModel):
     risk: RiskLevel | None = None
     risk_reasons: list[str] = Field(default_factory=list)
     data_gaps: list[str] = Field(default_factory=list)  # what could not be resolved, and why
+    compliance_findings: list[ComplianceFinding] = Field(default_factory=list)

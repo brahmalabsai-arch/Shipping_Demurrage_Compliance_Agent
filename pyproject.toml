@@ -31,9 +31,19 @@ dependencies = [
     # Gmail API + OAuth (architecture §7).
     "google-api-python-client>=2.150",
     "google-auth-oauthlib>=1.2",
+    # Compliance RAG (Phase 9): the BM25 half of the hybrid retriever (pure Python).
+    "rank-bm25>=0.2.2",
 ]
 
 [project.optional-dependencies]
+# The retriever's neural models (BGE embedder + MiniLM cross-encoder, as in PolicyMind). Needed
+# to run the app and the `models` tests; CI skips both. Install CPU-only PyTorch first (Linux
+# PyPI wheels bundle CUDA): pip install torch --index-url https://download.pytorch.org/whl/cpu
+# then: pip install -e ".[dev,models]"
+models = [
+    "torch>=2.5",
+    "sentence-transformers>=3.0",
+]
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
@@ -111,7 +121,8 @@ exclude = ["^\\.venv/", "^alembic/", "^docs/", "^build/"]
 
 # Third-party packages without type information.
 [[tool.mypy.overrides]]
-module = ["googleapiclient.*", "google_auth_oauthlib.*", "apscheduler.*", "httplib2.*"]
+module = ["googleapiclient.*", "google_auth_oauthlib.*", "apscheduler.*", "httplib2.*",
+          "rank_bm25.*", "sentence_transformers.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
@@ -135,4 +146,5 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "-ra --strict-markers --strict-config"
 markers = [
     "db: needs PostgreSQL (POSTGRES_TEST_DB); auto-applied to tests using the DB fixtures",
+    "models: loads the real embedding/reranker models (downloads weights; skipped in CI)",
 ]

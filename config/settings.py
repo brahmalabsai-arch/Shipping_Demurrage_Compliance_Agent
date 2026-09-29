@@ -37,6 +37,21 @@ class Settings(BaseSettings):
     # ChromaDB — embedded (in-process PersistentClient), no server
     chroma_path: Path = PROJECT_ROOT / "chroma_data"
 
+    # Compliance RAG (Phase 9) — the PolicyMind models (weights download on first use, into the
+    # Hugging Face cache). Hybrid retrieval: BM25 + dense → RRF → cross-encoder rerank.
+    embedding_model: str = "BAAI/bge-base-en-v1.5"
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rag_candidates: int = 20  # fused candidates handed to the reranker
+    rag_rrf_k: int = 60
+    # Cross-encoder logit below which a rule is "not relevant" (so an unanswerable question gets
+    # "not found in current rulebook" instead of the least-bad rule). Calibrated on the golden
+    # set (2026-09-29, MiniLM): correct rules scored -2.8 .. 7.4, unanswerable questions at
+    # best -10.8, wrong rules mostly below -6.4 — so the floor sits in that gap.
+    rag_min_rerank_score: float = -5.0
+    # Load the models when compliance_rulebook_mcp starts (required on Windows over stdio —
+    # see rag.models.warm_up); tests that only launch the server switch it off.
+    rag_preload_models: bool = True
+
     # Gmail OAuth (Phase 6)
     gmail_credentials_path: Path = PROJECT_ROOT / "secrets" / "credentials.json"
     gmail_token_path: Path = PROJECT_ROOT / "secrets" / "token.json"

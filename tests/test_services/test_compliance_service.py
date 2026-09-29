@@ -12,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import PROJECT_ROOT
 from models.db_models import AuditEvent, ComplianceRule
@@ -452,27 +452,35 @@ def test_database_allows_one_current_approved_version_per_rule(db_session: Sessi
         db_session.flush()
 
 
-# --------------------------------------------------------------------------- search (interim)
+# --------------------------------------------------------------------------- search (Phase 9)
 
 
-def test_search_ranks_approved_rules_by_query_overlap(db_session: Session) -> None:
-    for key, text_, codes in [
-        ("ORG-KR-CEPA", "Korean certificate of origin for preferential duty.", ["8708"]),
-        ("VAL-exchange-rate", "Convert value at the notified exchange rate.", []),
-        ("TYRES", "Certificate of origin for tyres.", ["4011"]),
-    ]:
-        rule = _propose(db_session, text_, rule_key=key, hs_codes=codes)
-        svc.decide(db_session, rule.id, APPROVE, REVIEWER)
-    _propose(db_session, "Korean certificate of origin pending text", rule_key="PENDING-KR")
+def test_search_retrieves_approved_rules_in_force_only(
+    session_factory: sessionmaker[Session],
+) -> None:
+    """Hybrid retrieval (fake models here; tests/test_rag has the real-model golden set).
+    Rules are indexed after their approval commits, so the setup commits."""
+    with session_factory() as session, session.begin():
+        for key, text_, codes in [
+            ("ORG-KR-CEPA", "Korean certificate of origin for preferential duty.", ["8708"]),
+            ("VAL-exchange-rate", "Convert value at the notified exchange rate.", []),
+            ("TYRES", "Certificate of origin for tyres.", ["4011"]),
+        ]:
+            rule = _propose(session, text_, rule_key=key, hs_codes=codes)
+            svc.decide(session, rule.id, APPROVE, REVIEWER)
+        _propose(session, "Korean certificate of origin pending text", rule_key="PENDING-KR")
 
-    matches = svc.search_rules(db_session, "Korean certificate of origin", hs_code="87084000")
+    with session_factory() as session:
+        matches = svc.search_rules(session, "Korean certificate of origin", hs_code="87084000")
+        everything = svc.search_rules(session, "certificate of origin")
+        stopwords_only = svc.search_rules(session, "the of and")
+        one = svc.search_rules(session, "certificate origin rate", limit=1)
 
     assert [m.rule.rule_key for m in matches] == ["ORG-KR-CEPA"]  # tyres filtered by HS code
-    assert matches[0].score == 1.0 and matches[0].method == "keyword"
-    everything = svc.search_rules(db_session, "certificate of origin")
-    assert "PENDING-KR" not in {m.rule.rule_key for m in everything}  # approved only
-    assert svc.search_rules(db_session, "the of and") == []  # stopwords only
-    assert len(svc.search_rules(db_session, "certificate origin rate", limit=1)) == 1
+    assert matches[0].method == "hybrid" and matches[0].rule.status is RuleStatus.APPROVED
+    assert "PENDING-KR" not in {m.rule.rule_key for m in everything}  # never indexed
+    assert stopwords_only == []
+    assert len(one) == 1
 
 
 # --------------------------------------------------------------------------- decision reasons

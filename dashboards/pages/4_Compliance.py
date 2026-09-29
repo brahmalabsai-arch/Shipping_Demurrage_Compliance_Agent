@@ -1,4 +1,5 @@
-"""Compliance — review pending rule changes, browse the rulebook in force, propose changes.
+"""Compliance — review pending rule changes, browse the rulebook in force, propose changes, and
+ask the Compliance agent (RAG over the approved rules in force, with citations).
 
 Reads and writes go through ``services.compliance_service`` — the same functions
 ``compliance_rulebook_mcp`` and the agents use. A proposal (from here or from the Regulatory
@@ -8,11 +9,14 @@ A proposal is always shown against the **rule in force** (``compliance_service.r
 with the history since it; a rejection must give a reason, stored with the decision.
 """
 
+import asyncio
 from datetime import date
 from typing import Any
 
 import streamlit as st
 
+from agents import compliance_rag_agent
+from agents.state import ComplianceFinding
 from dashboards.ui import fmt_ist, run_action, show_flash
 from models.enums import RuleDecision
 from models.schemas import ComplianceRuleRecord, ReviewContext, RuleProposal
@@ -206,6 +210,49 @@ def render_propose(approved: list[ComplianceRuleRecord], actor: str) -> None:
         )
 
 
+def render_ask() -> None:
+    """Ask the Compliance agent (RAG over the approved rulebook in force, with citations)."""
+    st.caption(
+        "Answers come only from the approved rules in force (pending and rejected versions are "
+        "never indexed): hybrid retrieval (BM25 + BGE embeddings, fused, then a cross-encoder "
+        "rerank), then an LLM answer that must cite the rules it uses — or the rule quoted "
+        'verbatim. If nothing relevant is found, the answer is "Not found in current '
+        'rulebook."'
+    )
+    with st.form("ask_rulebook"):
+        question = st.text_input("Question", key="ask_question")
+        hs_code = st.text_input("HS code (optional — only rules covering it)", key="ask_hs")
+        asked = st.form_submit_button("Ask the rulebook", key="ask_submit")
+    if asked and question.strip():
+        try:
+            with st.spinner("Searching the approved rulebook..."):
+                st.session_state["ask_result"] = asyncio.run(
+                    compliance_rag_agent.ask(question.strip(), hs_code.strip() or None)
+                )
+        except Exception as exc:  # show any failure to the operator
+            st.error(f"Question failed: {type(exc).__name__}: {exc}")
+    finding: ComplianceFinding | None = st.session_state.get("ask_result")
+    if finding is None:
+        return
+    st.markdown(f"**Q:** {finding.question}")
+    if finding.found:
+        st.success(finding.answer)
+    else:
+        st.info(finding.answer)
+    if finding.method == "template" and finding.fallback_reason:
+        st.caption(f"Quoted the rule instead of an LLM answer: {finding.fallback_reason}")
+    if finding.citations:
+        st.dataframe(
+            [
+                {"Rule": c.rule_key, "Version": c.version,
+                 "Effective": c.effective_date.isoformat(), "Relevance": round(c.score, 3)}
+                for c in finding.citations
+            ],
+            hide_index=True,
+            width="stretch",
+        )  # fmt: skip
+
+
 # --------------------------------------------------------------------------- page
 
 st.title("Compliance Rulebook")
@@ -222,9 +269,12 @@ with session_scope() as db:
     approved_rules = svc.list_approved(db)
     all_rules = svc.list_rules(db)
 
-pending_tab, rulebook_tab, history_tab, propose_tab = st.tabs(
-    [f"Pending review ({len(pending_rules)})", "Rulebook in force", "All versions", "Propose"]
-)
+pending_tab, rulebook_tab, history_tab, propose_tab, ask_tab = st.tabs(
+    [f"Pending review ({len(pending_rules)})", "Rulebook in force", "All versions", "Propose",
+     "Ask the rulebook"]
+)  # fmt: skip
+with ask_tab:
+    render_ask()
 with pending_tab:
     render_pending(review_contexts, reviewer_name)
 with rulebook_tab:

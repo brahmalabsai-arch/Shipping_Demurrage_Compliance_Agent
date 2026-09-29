@@ -3,9 +3,12 @@ with a named reviewer (``compliance_service.decide``) changes a rule's status.""
 
 from datetime import date
 
+import pytest
 from sqlalchemy.orm import Session, sessionmaker
 from streamlit.testing.v1 import AppTest
 
+from agents import compliance_rag_agent
+from agents.mcp_clients import memory_connector
 from config.settings import PROJECT_ROOT
 from models.enums import RuleStatus
 from models.schemas import ComplianceRuleRecord, RuleProposal
@@ -182,3 +185,42 @@ def test_card_compares_with_the_rule_in_force_and_shows_history(
     assert "-15% of the assessable" in diff and "+25% of the assessable" in diff
     history = at.dataframe[1].value  # [0] rulebook in force, [1] all versions
     assert "awaiting official notification" in set(history["Reason"])
+
+
+# --------------------------------------------------------------------------- Phase 9
+
+
+def test_ask_the_rulebook_answers_with_a_citation(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(compliance_rag_agent, "stdio_connector", memory_connector)
+    seed_compliance.seed()
+    at = _open_page()
+
+    at.text_input(key="ask_question").set_value(
+        "Can customs assess the bill of entry before the commercial invoice is filed?"
+    )
+    at.button(key="ask_submit").click()
+    at.run()
+
+    assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    [answer] = at.success
+    assert answer.value.startswith("Per [DOC-commercial-invoice-required v1]")
+    citations = at.dataframe[-1].value
+    assert citations.loc[0, "Rule"] == "DOC-commercial-invoice-required"
+
+
+def test_ask_the_rulebook_says_not_found(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(compliance_rag_agent, "stdio_connector", memory_connector)
+    seed_compliance.seed()
+    at = _open_page()
+
+    at.text_input(key="ask_question").set_value("Which licence is needed to import live poultry?")
+    at.button(key="ask_submit").click()
+    at.run()
+
+    assert not at.exception, at.exception
+    assert any(i.value == "Not found in current rulebook." for i in at.info)

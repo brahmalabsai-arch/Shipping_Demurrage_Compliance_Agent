@@ -113,6 +113,10 @@ class ChangeLogEntryNotFoundError(CustomsCopilotError):
     """No bulletin change_log entry exists with the given id."""
 
 
+class RuleNotIndexableError(CustomsCopilotError):
+    """Only the approved version in force may be embedded into the RAG index (Phase 9)."""
+
+
 # --------------------------------------------------------------------------- bulletin (Phase 4)
 
 

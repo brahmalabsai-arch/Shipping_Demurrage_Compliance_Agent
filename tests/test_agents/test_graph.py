@@ -1,4 +1,5 @@
-"""The shipment pipeline so far: document verification → demurrage & risk on one CaseState."""
+"""The shipment pipeline so far: document verification → (demurrage & risk ‖ compliance) on one
+CaseState. (No rulebook is seeded here: the compliance branch runs and finds nothing.)"""
 
 from datetime import date
 from decimal import Decimal
@@ -9,7 +10,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
-from agents import demurrage_risk_agent, document_verification_agent, graph
+from agents import compliance_rag_agent, demurrage_risk_agent, document_verification_agent, graph
 from agents.mcp_clients import memory_connector
 from models.db_models import AuditEvent
 from models.enums import ShipmentStatus
@@ -46,23 +47,23 @@ async def test_pipeline_fills_both_slices_and_risk_sees_the_discrepancies(
     assert state.demurrage_estimate.amount_inr == Decimal("15912.00")
     assert state.risk == "high"
     assert state.risk_reasons[-1].startswith("1 document discrepancy(ies) (quantity_mismatch)")
-    # each agent calls under its own name; one run_id threads through both
+    # each agent calls under its own name, on its own servers; one run_id threads through all
+    agents = {a.AGENT: a for a in (document_verification_agent, demurrage_risk_agent,
+                                   compliance_rag_agent)}  # fmt: skip
     calls = [e for e in logs if e["event"] == "agent.tool_call"]
-    actors = {e["actor"] for e in calls}
-    assert actors == {document_verification_agent.AGENT, demurrage_risk_agent.AGENT}
+    assert {e["actor"] for e in calls} == set(agents)
     assert {e["run_id"] for e in calls} == {state.run_id}
     for e in calls:
-        owner = (document_verification_agent if e["actor"] == document_verification_agent.AGENT
-                 else demurrage_risk_agent)  # fmt: skip
-        assert e["server"] in owner.SERVERS
+        assert e["server"] in agents[e["actor"]].SERVERS
     with session_factory() as session:
         events = session.scalars(
             select(AuditEvent).where(AuditEvent.entity_type == "agent_run")
             .order_by(AuditEvent.created_at)
         ).all()  # fmt: skip
-    assert [e.action for e in events] == [
-        "document_verification.completed", "demurrage_risk.completed",
-    ]  # fmt: skip
+    # verification first; then risk and compliance (parallel branches, either order)
+    assert events[0].action == "document_verification.completed"
+    assert {e.action for e in events[1:]} == {"demurrage_risk.completed",
+                                               "compliance_rag.completed"}  # fmt: skip
     assert {e.entity_id for e in events} == {UUID(state.run_id)}
 
 

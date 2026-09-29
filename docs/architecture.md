@@ -36,7 +36,9 @@ capstone-customs-copilot/
 │   ├── seed_shipments.py             # idempotent seed of the 4 fixture shipments
 │   ├── seed_port_rates.py            # idempotent seed of INNSA/INMUN demurrage tariffs
 │   ├── verify_documents.py           # run the document verification agent (--all / --container)
-│   └── analyse_shipments.py          # run the shipment pipeline built so far (--all / --container)
+│   ├── analyse_shipments.py          # run the shipment pipeline built so far (--all / --container)
+│   ├── index_rulebook.py             # rebuild the RAG index from the rulebook in force
+│   └── evaluate_rag.py               # opt-in RAGAS-metric report (LLM judge)
 ├── alembic/                          # schema migrations
 ├── services/                         # single source of truth — see §4
 │   ├── shipping_service.py
@@ -69,6 +71,8 @@ capstone-customs-copilot/
 │   ├── clearance_checklist_agent.py
 │   └── supervisor.py
 ├── rag/
+│   ├── models.py                     # BGE embedder + MiniLM cross-encoder (lazy), warm_up()
+│   ├── store.py                      # the Chroma collection (one entry per rule_key in force)
 │   ├── ingest.py                     # embeds approved rules into Chroma on approval
 │   └── retriever.py                  # BM25 + dense + RRF + cross-encoder rerank
 ├── scheduler/
@@ -305,8 +309,9 @@ bol_date?) -> ResolvedRate` (the four-rule engine, §8), `get_spot_rate(pair, as
 `create_gazetted_rate(rate)` (with `revision_of` = a correction).
 
 **`compliance_rulebook_mcp`** — `search_rules(query, hs_code?, limit=5) -> list[RuleMatch]`
-(approved rules only, via `list_approved`'s `WHERE status='approved'`; an interim keyword
-scorer until the Phase 9 hybrid retriever replaces it behind the same service function),
+(approved rules in force only — the Phase 9 hybrid retriever over the RAG index, which never
+holds pending/rejected/superseded text, each hit re-checked in Postgres; `method="hybrid"`,
+`score` = cross-encoder relevance; may be empty),
 `list_approved(hs_code?)`, `list_pending()`, `list_rules(rule_key?, status?)`,
 `get_rule(rule_id)`, `get_current_rule(rule_key)`, `propose_change(proposal: RuleProposal)`
 (rule_key, content, hs_codes, effective_date, change_summary?, source_diff_id? — status forced
@@ -399,6 +404,32 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
   `CaseState`; each node gets its own toolbox (own servers, own actor) via
   `config["configurable"][<agent name>]`, sharing one `run_id`. Shipping Ops → "Assess
   demurrage risk" and `python -m scripts.analyse_shipments` run it.
+
+  *As built (Phase 9):* **RAG index** — `rag/ingest.py` embeds only the approved version in
+  force (`RuleNotIndexableError` otherwise), one Chroma entry per `rule_key` (a new approval
+  replaces its predecessor); `compliance_service.decide` queues the rule and indexes it only in
+  an `after_commit` hook, from a fresh read (an approval that rolls back is never indexed);
+  `sync_rag_index` / `python -m scripts.index_rulebook` rebuild the index (backfill, repair).
+  **Retriever** (`rag/retriever.py`, the PolicyMind pipeline minus chunking): HS-code filter →
+  BGE dense (`BAAI/bge-base-en-v1.5`, Chroma) + BM25 (`rank-bm25`, built per query from the
+  collection) → RRF (k=60) → cross-encoder rerank (`cross-encoder/ms-marco-MiniLM-L-6-v2`) with
+  a relevance floor (`RAG_MIN_RERANK_SCORE=-5.0`, calibrated on the golden set) so an
+  unanswerable question returns nothing. `search_rules` keeps its signature (the MCP tool is
+  unchanged) and drops any hit Postgres no longer has as approved-in-force. Models are the
+  optional `models` extra (CPU PyTorch + sentence-transformers), loaded lazily — except
+  `compliance_rulebook_mcp`, which warms them up **before reading stdin** (on Windows a DLL
+  load in a worker thread deadlocks against the stdio transport's pending stdin read).
+  **Agent** — `agents/compliance_rag_agent.py` over `compliance_rulebook_mcp` only; reads
+  `shipment` and `document_discrepancies` from `CaseState`, asks a fixed question set (duty,
+  special requirements, documents, valuation rate, origin preference, one per discrepancy
+  kind) and writes `compliance_findings` (`ComplianceFinding`: question, found, answer,
+  `Citation`s, method). No hit → exactly "Not found in current rulebook." (no LLM call). The
+  reasoning-tier LLM must cite `[rule_key vN]` of retrieved rules only and pass the number
+  guard, else the rule is quoted verbatim. `agents/graph.py`: verification → (risk ‖
+  compliance). Compliance page → "Ask the rulebook". **Evaluation** — pytest golden set (12
+  Q/A, `models` marker, skipped in CI): hit@1 / hit@3 / MRR = 1.0; `scripts/evaluate_rag.py`
+  re-implements RAGAS context precision/recall with a Groq judge (the `ragas` package would
+  downgrade openai/langchain-openai) — 1.0 / 1.0 on 2026-09-29.
 
 **Human-in-the-loop**: implemented with LangGraph's native `interrupt()` inside `supervisor.py` at exactly two points — before `compliance_rulebook_mcp.decide()` is allowed to fire, and before a shipment can transition to `cleared`/filed. Graph state is persisted via `PostgresSaver` (LangGraph checkpointer, same Postgres instance), so an interrupted run survives process restarts and resumes cleanly when a human acts through the dashboard — this reuses the HITL pattern already proven in the delivery control tower project.
 

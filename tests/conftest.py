@@ -23,7 +23,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from config.settings import PROJECT_ROOT, get_settings
 from models.db_models import DOMAIN_SCHEMAS
+from rag import models as rag_models
 from services import db as db_module
+from tests.fixtures.rag import FakeEmbedder, FakeReranker
 
 DB_FIXTURES = {"db_engine", "db_connection", "session_factory", "db_session"}
 
@@ -54,6 +56,24 @@ def _no_external_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     monkeypatch.setattr(settings, "groq_api_key", None)
     monkeypatch.setattr(settings, "email_backend", "outbox")
     monkeypatch.setattr(settings, "outbox_path", tmp_path / "outbox")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_rag_index(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every test gets its own empty Chroma directory (never ``./chroma_data``), and the fake
+    embedder/reranker (``tests/fixtures/rag.py``) unless it is marked ``models`` — then the real
+    BGE / MiniLM models are used (downloaded on first use; skipped in CI)."""
+    try:
+        settings = get_settings()
+    except ValidationError:
+        return
+    monkeypatch.setattr(settings, "chroma_path", tmp_path / "chroma")
+    if request.node.get_closest_marker("models") is None:
+        embedder, reranker = FakeEmbedder(), FakeReranker()
+        monkeypatch.setattr(rag_models, "get_embedder", lambda: embedder)
+        monkeypatch.setattr(rag_models, "get_reranker", lambda: reranker)
 
 
 @pytest.fixture(scope="session")

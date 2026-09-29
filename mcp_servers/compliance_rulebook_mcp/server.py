@@ -8,6 +8,7 @@ mcp_servers.compliance_rulebook_mcp.server`` (stdio).
 
 from uuid import UUID
 
+from config.settings import get_settings
 from mcp_servers.common import ToolContext, configure_logging, create_server, run_tool
 from models.enums import RuleDecision, RuleStatus
 from models.schemas import (
@@ -17,6 +18,7 @@ from models.schemas import (
     RuleMatch,
     RuleProposal,
 )
+from rag import models as rag_models
 from services import compliance_service as svc
 
 mcp = create_server(
@@ -114,6 +116,8 @@ async def list_bulletin_drift(ctx: ToolContext) -> list[RuleDrift]:
 
 def main() -> None:
     configure_logging()
+    if get_settings().rag_preload_models:
+        rag_models.warm_up()  # before reading stdin — see rag.models.warm_up (Windows deadlock)
     mcp.run()
 
 

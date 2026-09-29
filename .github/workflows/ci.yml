@@ -23,7 +23,9 @@ jobs:
       - run: ruff check .
       - run: black --check .
       - run: mypy .
-      - run: pytest -m "not db"
+      # `models` tests load the real embedding/reranker weights (the optional `models` extra,
+      # not installed here); everything else uses deterministic fakes.
+      - run: pytest -m "not db and not models"
 
   # Docker is used here only, on GitHub's runner — never in local development.
   db:
@@ -43,6 +45,6 @@ jobs:
       - run: docker compose up -d --wait
       - name: Migrations apply and match the ORM models
         run: alembic upgrade head && alembic check
-      - run: pytest -m db
+      - run: pytest -m "db and not models"
       - if: always()
         run: docker compose down -v
