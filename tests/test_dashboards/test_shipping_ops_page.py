@@ -13,12 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from streamlit.testing.v1 import AppTest
 
-from agents import document_verification_agent
+from agents import document_verification_agent, graph
 from agents.mcp_clients import memory_connector
 from config.settings import PROJECT_ROOT
 from models.db_models import AuditEvent
 from models.enums import ContainerType, DocType, ShipmentStatus
-from scripts import seed_fx_rates, seed_shipments
+from scripts import seed_fx_rates, seed_port_rates, seed_shipments
 from services import shipping_service as svc
 from tests.fixtures.shipments import make_shipment
 
@@ -178,3 +178,31 @@ def test_container_type_is_editable_on_the_page(session_factory: sessionmaker[Se
     with session_factory() as session:
         stored = svc.get_shipment_by_container_id(session, CID)
     assert stored.container_type is ContainerType.DRY_40
+
+
+# --------------------------------------------------------------------------- Phase 8
+
+
+def test_assess_demurrage_risk_shows_the_estimate_and_risk(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delayed 40hc shipment: accruing and held → high risk, with the priced stay."""
+    monkeypatch.setattr(graph, "stdio_connector", memory_connector)
+    monkeypatch.setattr(graph, "today_ist", lambda: date(2026, 9, 28))
+    seed_shipments.seed()
+    seed_port_rates.seed()
+    seed_fx_rates.seed()
+    at = _open_page()
+    at.selectbox(key="selected_container").set_value("HLXU7004004").run()
+
+    at.button(key="assess_HLXU7004004").click()
+    at.run()
+
+    assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    [warning] = at.warning
+    assert warning.value.startswith("Risk: high — as of 2026-09-28")
+    metrics = {m.label: m.value for m in at.metric}
+    assert metrics["Chargeable days"] == "16"
+    assert metrics["Demurrage (USD)"] == "1,600.00"
+    assert metrics["Demurrage (INR)"] == "141,440.00"

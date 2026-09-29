@@ -35,7 +35,8 @@ capstone-customs-copilot/
 │   ├── seed.py                       # runs every domain seed (the one documented seed command)
 │   ├── seed_shipments.py             # idempotent seed of the 4 fixture shipments
 │   ├── seed_port_rates.py            # idempotent seed of INNSA/INMUN demurrage tariffs
-│   └── verify_documents.py           # run the document verification agent (--all / --container)
+│   ├── verify_documents.py           # run the document verification agent (--all / --container)
+│   └── analyse_shipments.py          # run the shipment pipeline built so far (--all / --container)
 ├── alembic/                          # schema migrations
 ├── services/                         # single source of truth — see §4
 │   ├── shipping_service.py
@@ -59,6 +60,7 @@ capstone-customs-copilot/
 │   ├── state.py                      # shared LangGraph state schema
 │   ├── mcp_clients.py                # open_toolbox: an agent's MCP servers, typed tool calls
 │   ├── guarded_llm.py                # LLM prose guard (no invented numbers) + fallback reason
+│   ├── ist.py                        # IST business days (today_ist, ist_day)
 │   ├── graph.py                      # top-level StateGraph wiring all agents
 │   ├── regulatory_watch_agent.py
 │   ├── document_verification_agent.py
@@ -378,6 +380,25 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
   agent writes no domain data; each run is audited as `document_verification.completed`. Runs
   from `python -m scripts.verify_documents` or Shipping Ops → "Verify documents"; the Phase 11
   supervisor wires the node into the pipeline.
+
+  *As built (Phase 8):* `agents/demurrage_risk_agent.py` over `shipping_records_mcp`,
+  `demurrage_rates_mcp` and `fx_rates_mcp`. Conventions (user decisions): the arrival day is the
+  IST day of the ETA (no separate dock date is stored) and counts as day 1 in port; the tariff in
+  force on the arrival day prices the whole stay (`get_demurrage_charge(as_of=arrival)` — a later
+  revision does not reprice it); the charge converts at the gazetted **port-charges** rate for
+  the tariff's currency (`USD/INR`) in force on the **analysis date**; money is rounded once,
+  half-up to 0.01, after conversion. `DemurrageEstimate` keeps every intermediate figure (days,
+  chargeable days, daily rate + tariff row id, the `ResolvedRate` + its `source_id`, amounts in
+  USD and INR, a `basis` sentence) for the Phase 12 ROI trail. Risk is deterministic: `high`
+  while charges accrue or customs holds the box; `medium` for a likely hold (document
+  discrepancies read from `CaseState`, free time ending within a day, ETA passed without
+  docking); `low`; `none` once cleared/closed; `indeterminate` without an ETA or a tariff. What
+  cannot be resolved (ETA, tariff, gazetted rate) goes into `data_gaps` and the rest of the
+  result is still returned. Audited `demurrage_risk.completed` / `.stopped`.
+  `agents/graph.py` runs `document_verification_agent → demurrage_risk_agent` on one
+  `CaseState`; each node gets its own toolbox (own servers, own actor) via
+  `config["configurable"][<agent name>]`, sharing one `run_id`. Shipping Ops → "Assess
+  demurrage risk" and `python -m scripts.analyse_shipments` run it.
 
 **Human-in-the-loop**: implemented with LangGraph's native `interrupt()` inside `supervisor.py` at exactly two points — before `compliance_rulebook_mcp.decide()` is allowed to fire, and before a shipment can transition to `cleared`/filed. Graph state is persisted via `PostgresSaver` (LangGraph checkpointer, same Postgres instance), so an interrupted run survives process restarts and resumes cleanly when a human acts through the dashboard — this reuses the HITL pattern already proven in the delivery control tower project.
 

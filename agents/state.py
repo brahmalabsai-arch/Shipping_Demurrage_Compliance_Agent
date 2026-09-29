@@ -2,7 +2,8 @@
 
 ``WatchState`` is the state of the regulatory watch pipeline (architecture §6: triggered by the
 scheduler, not by a shipment). ``CaseState`` is the shipment pipeline's state; each agent of that
-pipeline adds its own slice as it is built (Phase 7: the document verification fields).
+pipeline adds its own slice as it is built (Phase 7: document verification; Phase 8: demurrage
+and risk).
 """
 
 from datetime import date
@@ -12,6 +13,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from models.enums import ContainerType
 from models.schemas import (
     ChangeLogEntryRecord,
     ComplianceRuleRecord,
@@ -105,13 +107,49 @@ class Explanation(BaseModel):
     fallback_reason: str | None = None
 
 
+RiskLevel = Literal[
+    "none",  # cleared or closed: no further port charges accrue
+    "low",  # not yet charging and nothing suggests it will
+    "medium",  # a hold looks likely (document problems, free time nearly over, ETA passed)
+    "high",  # demurrage is accruing, or customs is holding the container
+    "indeterminate",  # cannot be assessed (no ETA, no tariff) — never reported as zero risk
+]
+
+
+class DemurrageEstimate(BaseModel):
+    """Every figure behind a demurrage estimate, so it can be recomputed by hand (conventions
+    §9). The tariff in force on the arrival day prices the whole stay; the arrival day is day 1;
+    the conversion uses the gazetted port-charges rate on the analysis date; money is rounded
+    once, half-up to 0.01, at the end."""
+
+    port_code: str
+    container_type: ContainerType
+    arrival_date: date  # IST day of the ETA (the shipments table has no separate dock date)
+    arrived: bool
+    as_of: date  # the analysis date
+    days_in_port: int  # arrival day counts; 0 before arrival
+    free_days: int
+    charges_from: date  # the first chargeable day
+    chargeable_days: int
+    daily_rate: Decimal
+    currency: str  # the tariff's currency
+    tariff_id: UUID  # the demurrage.port_rates row used
+    amount: Decimal  # chargeable_days x daily_rate, tariff currency
+    fx: ResolvedRate | None = None  # None: no conversion needed, or no rate (see data_gaps)
+    amount_inr: Decimal | None = None
+    daily_rate_inr: Decimal | None = None  # what each further chargeable day costs
+    basis: str  # the computation, in words
+
+
 class CaseState(BaseModel):
     """What the shipment pipeline knows about one shipment (architecture §6).
 
     Inputs: ``run_id``, ``shipment_id`` and ``as_of`` (the analysis date — "today" in IST for a
     live run, fixed in tests). Document verification (Phase 7) writes ``shipment``,
     ``documents``, ``fx_context``, ``document_discrepancies``, ``document_outcome`` and
-    ``document_explanation``.
+    ``document_explanation``. Demurrage & risk (Phase 8) reads ``document_discrepancies`` (if
+    verification ran first) and writes ``demurrage_estimate``, ``risk``, ``risk_reasons`` and
+    ``data_gaps``.
     """
 
     run_id: str
@@ -123,3 +161,7 @@ class CaseState(BaseModel):
     document_discrepancies: list[Discrepancy] = Field(default_factory=list)
     document_outcome: Literal["clear", "flagged"] | None = None
     document_explanation: Explanation | None = None
+    demurrage_estimate: DemurrageEstimate | None = None
+    risk: RiskLevel | None = None
+    risk_reasons: list[str] = Field(default_factory=list)
+    data_gaps: list[str] = Field(default_factory=list)  # what could not be resolved, and why

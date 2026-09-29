@@ -1,5 +1,5 @@
 """Shipping Ops — create, edit and advance shipments; attach and amend their documents; run
-the Document Verification agent on a shipment.
+the Document Verification agent, or the pipeline with the Demurrage & Risk agent, on a shipment.
 
 Every read and write goes through ``services.shipping_service`` (the same functions
 ``shipping_records_mcp`` calls), so the dashboard and the agents can never disagree about the
@@ -14,7 +14,7 @@ from typing import Any
 
 import streamlit as st
 
-from agents import document_verification_agent
+from agents import document_verification_agent, graph
 from agents.state import CaseState, Discrepancy
 from dashboards.ui import (
     fmt_ist,
@@ -335,6 +335,52 @@ def render_verification(s: ShipmentRecord) -> None:
         st.caption(f"FX: {fx.skipped_reason}")
 
 
+def _show_risk(state: CaseState) -> None:
+    heading = f"Risk: {state.risk} — as of {state.as_of.isoformat()} (run {state.run_id[:8]})"
+    reasons = "; ".join(state.risk_reasons)
+    if state.risk in ("high", "medium"):
+        st.warning(f"{heading}. {reasons}")
+    elif state.risk == "none":
+        st.success(f"{heading}. {reasons}")
+    else:
+        st.info(f"{heading}. {reasons}")
+    e = state.demurrage_estimate
+    if e is not None:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Days in port", e.days_in_port)
+        c2.metric("Chargeable days", e.chargeable_days)
+        c3.metric(f"Demurrage ({e.currency})", f"{e.amount:,}")
+        c4.metric("Demurrage (INR)", "—" if e.amount_inr is None else f"{e.amount_inr:,}")
+        st.caption(e.basis)
+    for gap in state.data_gaps:
+        st.warning(f"Data gap — {gap}")
+
+
+def render_risk(s: ShipmentRecord) -> None:
+    """Run the pipeline (document verification → demurrage & risk) and show the risk slice."""
+    cid = s.container_id
+    st.subheader("Demurrage & risk")
+    if s.status is ShipmentStatus.CANCELLED:
+        st.caption("Cancelled shipments are not assessed.")
+        return
+    st.caption(
+        "Runs document verification, then the Demurrage & Risk agent: the tariff in force on "
+        "the arrival day (arrival day = day 1), converted at the gazetted rate on today's date, "
+        "and a risk level that also weighs any document discrepancies. Read-only; audited."
+    )
+    if st.button("Assess demurrage risk", key=f"assess_{cid}"):
+        try:
+            with st.spinner("Assessing demurrage and risk..."):
+                st.session_state[f"risk_{cid}"] = asyncio.run(graph.analyse_shipment(s.id))
+        except ShipmentCancelledError as exc:
+            st.warning(f"Assessment stopped: {exc}")
+        except Exception as exc:  # show any failure to the operator
+            st.error(f"Assessment failed: {type(exc).__name__}: {exc}")
+    state: CaseState | None = st.session_state.get(f"risk_{cid}")
+    if state is not None:
+        _show_risk(state)
+
+
 def render_create_form(actor: str) -> None:
     with st.form("create_shipment", clear_on_submit=False):
         st.subheader("New shipment")
@@ -415,6 +461,7 @@ def render_shipments(actor: str) -> None:
     render_status_controls(shipment, actor)
     render_documents(shipment, actor)
     render_verification(shipment)
+    render_risk(shipment)
 
 
 st.title("Shipping Ops")

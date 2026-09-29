@@ -46,11 +46,10 @@ on the dashboard: Shipping Ops → a shipment → "Verify documents".
 from collections import Counter
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
-from zoneinfo import ZoneInfo
 
 import structlog
 from langchain_core.language_models import BaseChatModel
@@ -62,6 +61,7 @@ from pydantic import TypeAdapter
 from agents import llm
 from agents.audit import record_run_event
 from agents.guarded_llm import guarded_reply
+from agents.ist import today_ist
 from agents.mcp_clients import Connector, McpToolbox, open_toolbox, stdio_connector
 from agents.state import (
     CaseState,
@@ -83,7 +83,6 @@ SERVERS = (SHIPPING, FX)
 
 HOME_CURRENCY = "INR"
 RECORD = "shipment record"
-IST = ZoneInfo("Asia/Kolkata")
 
 CORE_DOCUMENTS = (DocType.INVOICE, DocType.PACKING_LIST, DocType.BILL_OF_LADING)
 LABELS: dict[DocType, str] = {
@@ -124,11 +123,6 @@ class VerificationDeps:
 
     toolbox: McpToolbox
     model: BaseChatModel | None
-
-
-def today_ist() -> date:
-    """The business calendar day now (IST) — the default analysis date of a live run."""
-    return datetime.now(IST).date()
 
 
 # --------------------------------------------------------------------------- cross-checks
@@ -420,7 +414,7 @@ async def explain(
 async def document_verification_agent(state: CaseState, config: RunnableConfig) -> dict[str, Any]:
     """LangGraph node: read the active shipment and its current documents → cross-check →
     resolve FX per lifecycle date → explain."""
-    deps: VerificationDeps = config["configurable"]["deps"]
+    deps: VerificationDeps = config["configurable"][AGENT]
     tools = deps.toolbox
     try:
         raw = await tools.call(SHIPPING, "get_active_shipment", {"shipment_id": state.shipment_id})
@@ -480,7 +474,7 @@ async def run(deps: VerificationDeps, shipment_id: UUID, *, as_of: date, run_id:
     """Verify one shipment and return the final state."""
     result = await build_graph().ainvoke(
         CaseState(run_id=run_id, shipment_id=shipment_id, as_of=as_of),
-        config={"configurable": {"deps": deps}},
+        config={"configurable": {AGENT: deps}},
     )
     return CaseState.model_validate(result)
 

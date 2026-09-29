@@ -23,7 +23,8 @@ from services.db import session_scope
 from services.errors import ShipmentCancelledError
 
 
-def _targets(container: str | None) -> list[ShipmentRecord]:
+def targets(container: str | None) -> list[ShipmentRecord]:
+    """The named shipment, or every shipment that is not cancelled."""
     with session_scope() as session:
         if container:
             return [shipping_service.get_shipment_by_container_id(session, container)]
@@ -55,7 +56,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--as-of", type=date.fromisoformat, help="analysis date (default: today)")
     args = parser.parse_args(argv)
     configure_logging()
-    print(json.dumps(asyncio.run(verify(_targets(args.container), args.as_of)), indent=2))
+    print(json.dumps(asyncio.run(verify(targets(args.container), args.as_of)), indent=2))
 
 
 if __name__ == "__main__":

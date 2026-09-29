@@ -11,9 +11,10 @@ synthetic. What each table covers:
              missing-document shipment has no invoice, so JPY has no commercial-invoice lock.
 * gazetted — fortnightly customs notifications July-October 2026 (CBIC notifies roughly twice a
              month), plus two corrections: EUR/INR 09-01..09-15 revised for the whole period
-             (the already-delayed shipment docked 09-08 must be charged at the revision), and
-             USD/INR 09-16..09-30 revised from 09-21 only (clean arrives 09-20 → original;
-             qty-mismatch arrives 09-22 → revision).
+             (a lookup for the already-delayed shipment's EUR goods, docked 09-08, must return
+             the revision), and USD/INR 09-16..09-30 revised from 09-21 only (a lookup on 09-20
+             → original; from 09-21 → revision). Demurrage tariffs are in USD, so the risk
+             agent converts them at USD/INR on the analysis date (Phase 8: 2026-09-28 → 88.40).
 """
 
 from dataclasses import dataclass
