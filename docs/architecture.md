@@ -76,6 +76,8 @@ capstone-customs-copilot/
 │   ├── store.py                      # the Chroma collection (one entry per rule_key in force)
 │   ├── ingest.py                     # embeds approved rules into Chroma on approval
 │   └── retriever.py                  # BM25 + dense + RRF + cross-encoder rerank
+├── roi/
+│   └── calculator.py                 # before/after ROI from frozen snapshots (Phase 12)
 ├── scheduler/
 │   └── watch_scheduler.py            # APScheduler job registration
 ├── integrations/
@@ -287,6 +289,17 @@ entity_type  TEXT
 entity_id    UUID
 payload      JSONB        -- inputs/outputs/tool calls, per conventions.md
 created_at   TIMESTAMPTZ DEFAULT now()
+```
+
+### 3.11 `roi.snapshots` (Phase 12, migration `0009`)
+```
+id UUID PK, name TEXT UNIQUE, as_of DATE (the analysis date FX is resolved on),
+captured_by TEXT, note TEXT, content JSONB, content_sha256 TEXT, captured_at TIMESTAMPTZ
+-- append-only (trigger roi.reject_mutation()); content = RoiSnapshotContent: per shipment not
+-- cancelled its record + current documents + arrival day (IST of ETA) + the tariff in force on
+-- that day + the gazetted port-charges ResolvedRate of the tariff currency on as_of (or gaps);
+-- the rulebook in force; the scenario assumptions (RoiAssumptions). The SHA-256 of its
+-- canonical JSON is re-checked on every read (SnapshotIntegrityError).
 ```
 
 ## 4. Service layer — single source of truth
@@ -548,6 +561,28 @@ Every branch raises a typed exception (`RateNotFoundError`) rather than defaulti
 ## 9. Dashboards
 
 Streamlit multipage app (`streamlit run dashboards/Home.py`). Each page imports the matching service module directly (in-process, same source of truth as §4) — no separate REST hop needed for the dashboards themselves. Mission Control (page 6) additionally triggers the LangGraph graph directly (via `agents/graph.py`) and renders `audit.events` as a live-updating table (Streamlit `st.rerun` on a short poll interval) plus the before/after ROI comparison (two runs of the same fixture set with the compliance/FX/demurrage data frozen at two different edited states).
+
+*As built (Phase 12):* `dashboards/pages/6_Mission_Control.py` has three tabs. **Case study** —
+"Analyse all shipments" runs `graph.analyse_shipment` for every shipment that is not cancelled
+(one `run_id` each) and summarises documents / risk / demurrage INR / rulebook / checklist; the
+supervised clearance runs (`governance.case_runs`) are listed, decided on Shipping Ops. **Audit
+trail** — `audit_service.query_events(run_id, actor, action/action_prefix, entity_type,
+entity_id, since, until, limit)` (a run = its `agent_run` events + events whose payload names
+it), newest first, refreshed by an `st.fragment(run_every=5 s)` when "Refresh" is on.
+**ROI** (user decisions 2026-10-01): a *hold-days* model with explicit, editable assumptions
+(`RoiAssumptions`: `base_clearance_days` = days in port with papers in order, default 3;
+`hold_days` per issue type, defaults missing_document 7, quantity/value mismatch 5,
+currency/invalid currency 4, date mismatch / quote expired / FX unavailable 2; several issues
+`combine` = longest hold (default) or sum). `roi_service.capture_snapshot` freezes the inputs
+(§3.11); `roi.calculator.compare(before, after)` reads only snapshots: issues = the
+verification agent's deterministic `cross_check` on the frozen documents; *before* stay = base +
+hold; *after* (issues caught pre-dock) = base; each priced with `demurrage_charge(tariff in
+force on the arrival day, stay)` × the frozen gazetted rate, rounded half-up once; avoided =
+before − after per shipment (with one snapshot on both sides = chargeable days avoided × daily
+rate × FX). A shipment with no issues contributes 0; one that cannot be priced is excluded and
+listed. Every intermediate figure and a `basis` sentence are returned (conventions §9). On the
+fixtures as of 2026-09-28 with the defaults: INR 82,212.00 (MSCU7002002 23,868.00 +
+CMAU7003003 58,344.00). CLI: `python -m scripts.roi capture|list|compare`.
 
 ## 10. Deployment (native, no Docker)
 

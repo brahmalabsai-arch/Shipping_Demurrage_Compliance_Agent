@@ -57,3 +57,4 @@
 
 ## 9. ROI reporting convention
 - The ROI calculator (Phase 12) must accept the fixture/rate snapshot as an explicit input parameter and return both the final number and the intermediate figures it was built from (per-shipment demurrage days avoided × daily rate × resolved FX rate) — never a single opaque output number with no reconstructable trail.
+- *As built:* snapshots are named, append-only `roi.snapshots` rows (SHA-256 checked on read); the scenario assumptions (base days in port, hold days per issue type, how several holds combine) are part of the snapshot and shown with every result — no figure is hidden in code; the calculator (`roi.calculator.compare`) never reads live data.

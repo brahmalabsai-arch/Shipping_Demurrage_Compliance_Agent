@@ -62,6 +62,7 @@ DOMAIN_SCHEMAS = (
     "bulletin",
     "audit",
     "governance",
+    "roi",
 )
 
 # LangGraph's checkpoint tables (Phase 11). The migration creates the schema; the library's own
@@ -483,6 +484,31 @@ class FilingDecision(Base):
     ready_for_clearance: Mapped[bool] = mapped_column(Boolean)
     checklist: Mapped[dict[str, Any]] = mapped_column(JSONB)  # what the reviewer saw
     decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+
+
+# --------------------------------------------------------------------------- roi
+
+
+class RoiSnapshot(Base):
+    """A named, frozen copy of everything the ROI calculator needs (Phase 12): per shipment the
+    record, its current documents, the tariff in force on its arrival day and the gazetted
+    port-charges FX rate on the analysis date — plus the rulebook in force and the scenario
+    assumptions. Append-only (trigger, migration ``0009``); ``content_sha256`` is checked on
+    every read, so a comparison is always over exactly the data that was captured."""
+
+    __tablename__ = "snapshots"
+    __table_args__ = (UniqueConstraint("name"), {"schema": "roi"})
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(Text)
+    as_of: Mapped[date] = mapped_column(Date)  # the analysis date the snapshot prices at
+    captured_by: Mapped[str] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    content_sha256: Mapped[str] = mapped_column(Text)
+    captured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, server_default=func.now()
     )
 

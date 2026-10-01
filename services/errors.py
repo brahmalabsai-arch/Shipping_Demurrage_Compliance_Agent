@@ -205,3 +205,23 @@ class FilingAlreadyDecidedError(CustomsCopilotError):
 class InvalidFilingDecisionError(CustomsCopilotError):
     """A filing decision must name a reviewer; a rejection must give a reason; an approval must
     be an approval of this shipment's run."""
+
+
+# --------------------------------------------------------------------------- roi (Phase 12)
+
+
+class RoiSnapshotNotFoundError(CustomsCopilotError):
+    """No ROI snapshot exists with the given id or name."""
+
+
+class DuplicateSnapshotNameError(CustomsCopilotError):
+    """An ROI snapshot with this name already exists (snapshots are never overwritten)."""
+
+
+class SnapshotIntegrityError(CustomsCopilotError):
+    """A stored ROI snapshot no longer matches its recorded SHA-256 — it was altered."""
+
+
+class InvalidAssumptionsError(CustomsCopilotError):
+    """The ROI scenario assumptions are incomplete or invalid (e.g. an issue type has no hold
+    duration)."""

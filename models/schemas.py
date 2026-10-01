@@ -611,3 +611,95 @@ class FilingDecisionRecord(BaseModel):
     ready_for_clearance: bool
     checklist: dict[str, Any]
     decided_at: datetime
+
+
+# --------------------------------------------------------------------------- audit (Phase 12)
+
+
+class AuditEventRecord(BaseModel):
+    """One audit event, as Mission Control lists it."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    actor: str
+    action: str
+    entity_type: str
+    entity_id: UUID
+    payload: dict[str, Any]
+    created_at: datetime
+
+
+# --------------------------------------------------------------------------- roi (Phase 12)
+
+# The issue types the document cross-check raises (agents.state.DiscrepancyCode), each with the
+# default number of days customs holds a box when the issue is only found at the port.
+DEFAULT_HOLD_DAYS: dict[str, int] = {
+    "missing_document": 7,
+    "quantity_mismatch": 5,
+    "value_mismatch": 5,
+    "currency_mismatch": 4,
+    "invalid_currency": 4,
+    "date_mismatch": 2,
+    "quote_expired": 2,
+    "fx_rate_unavailable": 2,
+}
+
+
+class RoiAssumptions(BaseModel):
+    """The scenario assumptions of an ROI comparison — explicit, editable, frozen with the
+    snapshot and shown next to every result (nothing hidden in code).
+
+    A box needs ``base_clearance_days`` in port when its papers are in order (the *after*
+    scenario: the agents caught every issue before it docked). Without the agents (*before*),
+    each issue is found only by customs at the port and holds the box ``hold_days[code]`` more
+    days; several issues are resolved in parallel (``combine="max"``, the conservative default)
+    or one after another (``"sum"``).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    base_clearance_days: Annotated[int, Field(ge=1, le=60)] = 3
+    hold_days: dict[str, Annotated[int, Field(ge=0, le=120)]] = Field(
+        default_factory=lambda: dict(DEFAULT_HOLD_DAYS)
+    )
+    combine: Literal["max", "sum"] = "max"
+
+
+class SnapshotShipment(BaseModel):
+    """One shipment as frozen in an ROI snapshot, with the tariff and FX rate that price it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    shipment: ShipmentRecord
+    documents: list[DocumentRecord]  # current versions
+    arrival_date: date | None  # IST day of the ETA
+    tariff: PortRateRecord | None  # in force on the arrival day
+    fx: ResolvedRate | None  # gazetted port-charges rate of the tariff currency on as_of
+    gaps: list[str] = Field(default_factory=list)  # what could not be frozen, and why
+
+
+class RoiSnapshotContent(BaseModel):
+    """Everything an ROI comparison reads — never the live database."""
+
+    model_config = ConfigDict(frozen=True)
+
+    as_of: date
+    assumptions: RoiAssumptions
+    shipments: list[SnapshotShipment]
+    rules_in_force: list[ComplianceRuleRecord]
+
+
+class RoiSnapshotRecord(BaseModel):
+    """A stored ROI snapshot (content verified against its SHA-256 when read)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    name: str
+    as_of: date
+    captured_by: str
+    note: str | None
+    content: RoiSnapshotContent
+    content_sha256: str
+    captured_at: datetime

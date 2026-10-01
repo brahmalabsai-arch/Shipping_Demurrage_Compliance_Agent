@@ -311,6 +311,7 @@ PROJECT_PACKAGES = (
     "mcp_servers",
     "agents",
     "rag",
+    "roi",
     "scheduler",
     "integrations",
     "dashboards",
