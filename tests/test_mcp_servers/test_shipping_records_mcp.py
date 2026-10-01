@@ -13,6 +13,7 @@ from mcp_servers.shipping_records_mcp.server import mcp
 from models.db_models import AuditEvent
 from models.enums import DocType, ShipmentStatus
 from services import shipping_service as svc
+from tests.fixtures.governance import approve_filing
 from tests.fixtures.shipments import make_shipment
 from tests.test_mcp_servers.conftest import assert_parity, assert_tool_error, connect, structured
 
@@ -27,6 +28,7 @@ TOOLS_TESTED = {
     "update_status",
     "create_document",
     "update_document",
+    "clear_shipment",
 }
 CLEAN, DELAYED = "MSKU7001001", "HLXU7004004"
 Ids = dict[str, Any]
@@ -110,6 +112,9 @@ async def test_domain_errors_come_back_typed(seeded: None, direct: Any) -> None:
     ids = direct(_ids)
     async with connect(mcp) as client:
         illegal = await client.call_tool(
+            "update_status", {"shipment_id": str(ids["delayed"]), "status": "docked"}
+        )
+        uncleared = await client.call_tool(
             "update_status", {"shipment_id": str(ids["delayed"]), "status": "cleared"}
         )
         duplicate = await client.call_tool(
@@ -118,6 +123,7 @@ async def test_domain_errors_come_back_typed(seeded: None, direct: Any) -> None:
         )
 
     assert_tool_error(illegal, "InvalidStatusTransitionError")
+    assert_tool_error(uncleared, "ClearanceRequiresApprovalError")
     assert_tool_error(duplicate, "DuplicateContainerError")
 
 
@@ -135,3 +141,26 @@ async def test_cancelled_shipment_is_refused_to_agents(direct: Any, session_fact
         result = await client.call_tool("get_active_shipment", {"shipment_id": str(quoted.id)})
 
     assert_tool_error(result, "ShipmentCancelledError")
+
+
+async def test_clear_shipment_needs_an_approved_filing_decision(
+    seeded: None, direct: Any, session_factory: Any
+) -> None:
+    ids = direct(_ids)
+    with session_factory() as session, session.begin():
+        for status in (ShipmentStatus.UNDER_REVIEW,):
+            svc.update_status(session, ids["delayed"], status, "test")  # held -> under_review
+        decision = approve_filing(session, ids["delayed"])
+    async with connect(mcp) as client:
+        wrong = await client.call_tool(
+            "clear_shipment", {"shipment_id": str(ids["clean"]),
+                               "filing_decision_id": str(decision.id)})  # fmt: skip
+        cleared = await client.call_tool(
+            "clear_shipment",
+            {"shipment_id": str(ids["delayed"]), "filing_decision_id": str(decision.id)},
+            meta={"actor": "supervisor"},
+        )
+
+    assert_tool_error(wrong, "InvalidFilingDecisionError")
+    assert_parity(cleared, direct(lambda s: svc.get_shipment(s, ids["delayed"])))
+    assert structured(cleared)["status"] == "cleared"

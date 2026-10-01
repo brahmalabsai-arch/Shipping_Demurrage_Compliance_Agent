@@ -100,6 +100,18 @@ async def decide(
 
 
 @mcp.tool()
+async def revoke_decision(
+    ctx: ToolContext, rule_id: UUID, reviewer: str, reason: str
+) -> ComplianceRuleRecord:
+    """Withdraw the approval of a rule's version in force (a named human reviewer, with a
+    reason). Recorded as a separate revocation — the original approval is kept — and the version
+    it had superseded is back in force."""
+    arguments = {"rule_id": rule_id, "reviewer": reviewer, "reason": reason}
+    return await run_tool(ctx, "revoke_decision", arguments,
+                          lambda s, _: svc.revoke_decision(s, rule_id, reviewer, reason))  # fmt: skip
+
+
+@mcp.tool()
 async def get_review_context(ctx: ToolContext, rule_id: UUID) -> ReviewContext:
     """What a reviewer judges a proposal against: the rule in force it would replace and the
     history since (other proposals — pending, or rejected and why)."""

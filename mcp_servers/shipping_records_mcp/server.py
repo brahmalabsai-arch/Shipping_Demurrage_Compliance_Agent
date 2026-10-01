@@ -90,9 +90,23 @@ async def update_shipment(
 async def update_status(
     ctx: ToolContext, shipment_id: UUID, status: ShipmentStatus
 ) -> ShipmentRecord:
-    """Move a shipment to another lifecycle status; only allowed transitions succeed."""
+    """Move a shipment to another lifecycle status; only allowed transitions succeed. Never to
+    ``cleared`` — see ``clear_shipment``."""
     return await run_tool(ctx, "update_status", {"shipment_id": shipment_id, "status": status},
                           lambda s, c: svc.update_status(s, shipment_id, status, c.actor))  # fmt: skip
+
+
+@mcp.tool()
+async def clear_shipment(
+    ctx: ToolContext, shipment_id: UUID, filing_decision_id: UUID
+) -> ShipmentRecord:
+    """File a shipment under review as ``cleared``, citing a reviewer's approved filing decision
+    (taken at a supervised clearance run's filing gate) — the only way to clear a shipment."""
+    arguments = {"shipment_id": shipment_id, "filing_decision_id": filing_decision_id}
+    return await run_tool(
+        ctx, "clear_shipment", arguments,
+        lambda s, c: svc.clear_shipment(s, shipment_id, filing_decision_id, c.actor),
+    )  # fmt: skip
 
 
 @mcp.tool()

@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     gmail_token_path: Path = PROJECT_ROOT / "secrets" / "token.json"
     reviewer_email: str | None = None
 
+    # The people who may take the human decisions (Phase 11): compliance approvals/revocations
+    # on the dashboard and the supervisor's filing gate. "Name <email>" entries separated by
+    # ";" or "," (email optional), e.g. "Rupin <4x2kms@gmail.com>; Asha Rao". Empty = nobody can
+    # decide from the dashboard.
+    reviewers: str | None = None
+
     # Outgoing email: 'outbox' writes .eml files locally (default, no network); 'gmail' sends
     # through the Gmail API (Phase 6).
     email_backend: Literal["outbox", "gmail"] = "outbox"

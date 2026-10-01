@@ -26,6 +26,7 @@ from services.errors import (
     InvalidDecisionError,
     RuleAlreadyDecidedError,
     RuleNotFoundError,
+    RuleNotInForceError,
     StaleProposalError,
 )
 from tests.fixtures.compliance import BASELINE_BULLETIN, edit_section
@@ -365,13 +366,15 @@ class _StatusWrites(ast.NodeVisitor):
 
 
 def test_only_decide_changes_a_rule_status() -> None:
-    """Exit criterion: in compliance_service, ``decide`` is the only function that assigns
-    ``status``; creation (``ComplianceRule(...)``) may only ever say ``RuleStatus.PENDING``."""
+    """Exit criterion: in compliance_service, ``decide`` is the only function that decides
+    (assigns ``status``) — plus, since Phase 11, ``revoke_decision`` (approved -> revoked only,
+    trigger-enforced); creation (``ComplianceRule(...)``) may only ever say
+    ``RuleStatus.PENDING``."""
     visitor = _StatusWrites()
     visitor.visit(ast.parse(SERVICE.read_text(encoding="utf-8")))
 
     assert visitor.writes, "the scan found no status write at all - is it still looking?"
-    assert {function for function, _, _ in visitor.writes} == {"decide"}
+    assert {function for function, _, _ in visitor.writes} == {"decide", "revoke_decision"}
 
 
 def test_no_other_module_can_write_compliance_rules() -> None:
@@ -610,3 +613,119 @@ def test_bulletin_drift_knows_pending_and_rejected_versions_of_the_same_text(
     same_pending, same_rejected = drifts[KEY].pending_same, drifts["OTHER"].rejected_same
     assert same_pending is not None and same_pending.id == pending.id
     assert same_rejected is not None and same_rejected.decision_note == "not applicable to us"
+
+
+# --------------------------------------------------------------------------- revocation (Phase 11)
+
+
+def _v2_approved_over_v1(session: Session) -> tuple[ComplianceRuleRecord, ComplianceRuleRecord]:
+    v1 = _approved_v1(session)
+    v2 = svc.decide(session, _propose(session, "BCD 20%.").id, APPROVE, REVIEWER, "notified")
+    return v1, v2
+
+
+def test_revoking_keeps_the_approval_and_reinstates_the_previous_version(
+    db_session: Session,
+) -> None:
+    v1, v2 = _v2_approved_over_v1(db_session)
+
+    revoked = svc.revoke_decision(db_session, v2.id, "b.rao (compliance)", "notice withdrawn")
+
+    assert revoked.status is RuleStatus.REVOKED
+    assert (revoked.decided_by, revoked.decided_at, revoked.decision_note) == (
+        v2.decided_by, v2.decided_at, "notified"
+    )  # fmt: skip
+    assert (revoked.revoked_by, revoked.revoke_note) == ("b.rao (compliance)", "notice withdrawn")
+    assert revoked.revoked_at is not None
+    assert svc.get_current_rule(db_session, KEY).id == v1.id
+    assert svc.get_rule(db_session, v1.id).superseded_by is None
+    assert [r.version for r in svc.list_approved(db_session)] == [1]
+    assert _actions(db_session)[-2:] == ["compliance_rule.revoked", "compliance_rule.reinstated"]
+
+
+def test_revoking_the_first_version_leaves_nothing_in_force(db_session: Session) -> None:
+    v1 = _approved_v1(db_session)
+    svc.revoke_decision(db_session, v1.id, REVIEWER, "rule withdrawn")
+
+    with pytest.raises(RuleNotFoundError):
+        svc.get_current_rule(db_session, KEY)
+    assert _actions(db_session)[-1] == "compliance_rule.revoked"
+    # a new proposal can be approved into the gap
+    v2 = _propose(db_session, "BCD 18%.")
+    assert svc.decide(db_session, v2.id, APPROVE, REVIEWER).superseded_by is None
+    assert svc.get_current_rule(db_session, KEY).id == v2.id
+
+
+@pytest.mark.parametrize(("reviewer", "reason"), [(" ", "why"), ("a.sharma", " ")])
+def test_a_revocation_names_who_and_why(db_session: Session, reviewer: str, reason: str) -> None:
+    v1 = _approved_v1(db_session)
+    with pytest.raises(InvalidDecisionError):
+        svc.revoke_decision(db_session, v1.id, reviewer, reason)
+
+
+def test_only_the_version_in_force_can_be_revoked(db_session: Session) -> None:
+    v1, v2 = _v2_approved_over_v1(db_session)
+    pending = _propose(db_session, "BCD 25%.")
+    rejected = svc.decide(db_session, _propose(db_session, "BCD 30%.").id, REJECT, REVIEWER, "no")
+
+    for rule in (v1, pending, rejected):  # superseded, pending, rejected
+        with pytest.raises(RuleNotInForceError):
+            svc.revoke_decision(db_session, rule.id, REVIEWER, "why")
+    svc.revoke_decision(db_session, v2.id, REVIEWER, "why")
+    with pytest.raises(RuleNotInForceError):  # final
+        svc.revoke_decision(db_session, v2.id, REVIEWER, "again")
+    with pytest.raises(RuleNotFoundError):
+        svc.revoke_decision(db_session, uuid4(), REVIEWER, "why")
+
+
+@pytest.mark.parametrize(
+    ("statement", "message"),
+    [
+        # revoking behind the service's back must still record who and why
+        ("UPDATE compliance.rules SET status = 'revoked' WHERE id = :v2", "who, when and why"),
+        # and must not rewrite the approval
+        (
+            "UPDATE compliance.rules SET status = 'revoked', revoked_by = 'x', revoked_at = now(),"
+            " revoke_note = 'y', decided_by = 'someone else' WHERE id = :v2",
+            "immutable",
+        ),
+        # a superseded version cannot be revoked
+        (
+            "UPDATE compliance.rules SET status = 'revoked', revoked_by = 'x', revoked_at = now(),"
+            " revoke_note = 'y' WHERE id = :v1",
+            "version in force",
+        ),
+        # nor reinstated while its successor is still approved
+        ("UPDATE compliance.rules SET superseded_by = NULL WHERE id = :v1", "reinstated only"),
+        # revocation fields are set only by revoking
+        ("UPDATE compliance.rules SET revoke_note = 'x' WHERE id = :v2", "only by revoking"),
+    ],
+)
+def test_database_guards_revocation(db_session: Session, statement: str, message: str) -> None:
+    v1, v2 = _v2_approved_over_v1(db_session)
+    with pytest.raises(IntegrityError, match=message), db_session.begin_nested():
+        db_session.execute(text(statement), {"v1": v1.id, "v2": v2.id})
+
+
+def test_a_revoked_version_is_final_in_the_database(db_session: Session) -> None:
+    _, v2 = _v2_approved_over_v1(db_session)
+    svc.revoke_decision(db_session, v2.id, REVIEWER, "why")
+    with pytest.raises(IntegrityError, match="already revoked"), db_session.begin_nested():
+        db_session.execute(
+            text("UPDATE compliance.rules SET status = 'approved' WHERE id = :id"), {"id": v2.id}
+        )
+
+
+def test_review_history_and_drift_remember_a_revoked_text(db_session: Session) -> None:
+    _, v2 = _v2_approved_over_v1(db_session)
+    svc.revoke_decision(db_session, v2.id, "b.rao", "notice withdrawn")
+    v3 = _propose(db_session, "BCD 22%.")
+    bulletin = "Preamble.\n\n## HSN-8708-duty\nEffective: 2026-04-01\nHS codes: 8708\nBCD 20%.\n"
+    _scan_published(db_session, bulletin)
+
+    history = svc.review_context(db_session, v3.id).history
+    [drift] = svc.bulletin_drift(db_session)
+
+    assert any("v2 was approved by" in line and "revoked by b.rao" in line
+               and "notice withdrawn" in line for line in history)  # fmt: skip
+    assert drift.rejected_same is not None and drift.rejected_same.id == v2.id  # never re-raised

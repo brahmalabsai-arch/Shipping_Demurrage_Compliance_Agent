@@ -3,6 +3,7 @@
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -11,18 +12,29 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models.db_models import AuditEvent
-from models.enums import ContainerType, DocType, ShipmentStatus
-from models.schemas import DocumentAmend, DocumentCreate, ShipmentCreate, ShipmentUpdate
+from models.enums import ContainerType, DocType, RunState, ShipmentStatus
+from models.schemas import (
+    DocumentAmend,
+    DocumentCreate,
+    ShipmentCreate,
+    ShipmentRecord,
+    ShipmentUpdate,
+)
+from services import governance_service
 from services import shipping_service as svc
 from services.errors import (
+    ClearanceRequiresApprovalError,
     DocumentNotFoundError,
     DocumentSupersededError,
     DuplicateContainerError,
+    FilingDecisionNotFoundError,
+    InvalidFilingDecisionError,
     InvalidShipmentDataError,
     InvalidStatusTransitionError,
     ShipmentCancelledError,
     ShipmentNotFoundError,
 )
+from tests.fixtures.governance import approve_filing, clear
 from tests.fixtures.shipments import make_shipment
 
 S = ShipmentStatus
@@ -207,7 +219,10 @@ def test_full_happy_path_lifecycle_is_allowed_and_each_move_audited(db_session: 
     path += [S.CLEARED, S.CLOSED]
 
     for status in path:
-        assert svc.update_status(db_session, created.id, status, ACTOR).status is status
+        if status is S.CLEARED:  # Phase 11: only by filing with an approval
+            assert clear(db_session, created.id, ACTOR).status is status
+        else:
+            assert svc.update_status(db_session, created.id, status, ACTOR).status is status
 
     moves = [
         (e.payload["from"], e.payload["to"])
@@ -222,7 +237,6 @@ def test_full_happy_path_lifecycle_is_allowed_and_each_move_audited(db_session: 
     [
         ([], S.DOCKED),  # quoted cannot skip booking/transit
         ([], S.QUOTED),  # no-op move to the current status
-        ([S.BOOKED, S.IN_TRANSIT, S.DOCKED], S.CLEARED),  # must pass review first
         ([S.BOOKED, S.IN_TRANSIT, S.DOCKED], S.CANCELLED),  # too late to cancel at port
         ([S.BOOKED, S.CANCELLED], S.BOOKED),  # cancelled is terminal
     ],
@@ -240,12 +254,95 @@ def test_illegal_transitions_raise(
 
 def test_closed_is_terminal(db_session: Session) -> None:
     created = svc.create_shipment(db_session, make_shipment(), ACTOR)
-    for status in [S.BOOKED, S.IN_TRANSIT, S.DOCKED, S.UNDER_REVIEW, S.CLEARED, S.CLOSED]:
+    for status in [S.BOOKED, S.IN_TRANSIT, S.DOCKED, S.UNDER_REVIEW]:
         svc.update_status(db_session, created.id, status, ACTOR)
+    clear(db_session, created.id, ACTOR)
+    svc.update_status(db_session, created.id, S.CLOSED, ACTOR)
 
     assert svc.allowed_transitions(S.CLOSED) == frozenset()
     with pytest.raises(InvalidStatusTransitionError):
         svc.update_status(db_session, created.id, S.HELD, ACTOR)
+
+
+# --------------------------------------------------------------------------- clearance (Phase 11)
+
+
+def _under_review(db_session: Session) -> ShipmentRecord:
+    created = svc.create_shipment(db_session, make_shipment(), ACTOR)
+    for status in [S.BOOKED, S.IN_TRANSIT, S.DOCKED, S.UNDER_REVIEW]:
+        svc.update_status(db_session, created.id, status, ACTOR)
+    return created
+
+
+@pytest.mark.parametrize(
+    "path", [[S.BOOKED, S.IN_TRANSIT, S.DOCKED], [S.BOOKED, S.IN_TRANSIT, S.DOCKED, S.UNDER_REVIEW]]
+)
+def test_update_status_never_clears(db_session: Session, path: list[ShipmentStatus]) -> None:
+    created = svc.create_shipment(db_session, make_shipment(), ACTOR)
+    for status in path:
+        svc.update_status(db_session, created.id, status, ACTOR)
+
+    with pytest.raises(ClearanceRequiresApprovalError):
+        svc.update_status(db_session, created.id, S.CLEARED, ACTOR)
+    assert svc.get_shipment(db_session, created.id).status is path[-1]
+
+
+def test_clear_shipment_cites_the_approval_in_the_audit(db_session: Session) -> None:
+    created = _under_review(db_session)
+    decision = approve_filing(db_session, created.id)
+
+    cleared = svc.clear_shipment(db_session, created.id, decision.id, ACTOR)
+
+    assert cleared.status is S.CLEARED
+    last = [e for e in _events(db_session, created.id) if e.action == "shipment.status_changed"][-1]
+    assert last.payload["to"] == "cleared"
+    assert last.payload["filing_decision_id"] == str(decision.id)
+    assert last.payload["approved_by"] == decision.reviewer
+
+
+def test_clear_shipment_needs_an_approval_of_this_shipment(db_session: Session) -> None:
+    created = _under_review(db_session)
+    other = svc.create_shipment(db_session, make_shipment(container_id="TSTU0000002"), ACTOR)
+    elsewhere = approve_filing(db_session, other.id)
+
+    with pytest.raises(FilingDecisionNotFoundError):
+        svc.clear_shipment(db_session, created.id, uuid4(), ACTOR)
+    with pytest.raises(InvalidFilingDecisionError, match="another shipment"):
+        svc.clear_shipment(db_session, created.id, elsewhere.id, ACTOR)
+    assert svc.get_shipment(db_session, created.id).status is S.UNDER_REVIEW
+
+
+def test_clear_shipment_refuses_a_rejection(db_session: Session) -> None:
+    created = _under_review(db_session)
+    run_id = str(uuid4())
+    governance_service.start_run(db_session, run_id, created.id, date(2026, 9, 28), ACTOR)
+    governance_service.update_run(db_session, run_id, RunState.AWAITING_FILING, actor=ACTOR)
+    rejection = governance_service.record_filing_decision(
+        db_session, run_id, "reject", "Asha Rao", "valuation query", checklist={},
+        ready_for_clearance=True,
+    )  # fmt: skip
+
+    with pytest.raises(InvalidFilingDecisionError, match="rejection"):
+        svc.clear_shipment(db_session, created.id, rejection.id, ACTOR)
+
+
+def test_clear_shipment_only_from_under_review(db_session: Session) -> None:
+    created = svc.create_shipment(db_session, make_shipment(), ACTOR)
+    for status in [S.BOOKED, S.IN_TRANSIT, S.DOCKED]:
+        svc.update_status(db_session, created.id, status, ACTOR)
+    decision = approve_filing(db_session, created.id)
+
+    with pytest.raises(InvalidStatusTransitionError, match="under_review"):
+        svc.clear_shipment(db_session, created.id, decision.id, ACTOR)
+
+
+def test_database_refuses_clearing_without_an_approval(db_session: Session) -> None:
+    created = _under_review(db_session)
+    with pytest.raises(IntegrityError, match="approved filing decision"), db_session.begin_nested():
+        db_session.execute(
+            text("UPDATE shipping.shipments SET status = 'cleared' WHERE id = :id"),
+            {"id": created.id},
+        )
 
 
 # --------------------------------------------------------------------------- cancellation

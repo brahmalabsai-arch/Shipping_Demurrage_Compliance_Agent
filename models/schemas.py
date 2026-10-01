@@ -8,7 +8,7 @@ validate at the boundary so bad data never reaches the service layer.
 from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated, ClassVar, Literal, Self
+from typing import Annotated, Any, ClassVar, Literal, Self
 from uuid import UUID
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
@@ -20,7 +20,9 @@ from models.enums import (
     InvoiceKind,
     LockType,
     RateSource,
+    RuleDecision,
     RuleStatus,
+    RunState,
     SectionChangeKind,
     ShipmentStatus,
 )
@@ -418,6 +420,9 @@ class ComplianceRuleRecord(BaseModel):
     decided_by: str | None
     decided_at: datetime | None
     decision_note: str | None
+    revoked_by: str | None = None
+    revoked_at: datetime | None = None
+    revoke_note: str | None = None
 
     def applies_to(self, hs_code: str) -> bool:
         """True if the rule covers ``hs_code`` (see :func:`hs_codes_cover`)."""
@@ -536,8 +541,8 @@ class RuleDrift(BaseModel):
     the approved rule in force — or has no approved rule yet (``in_force`` None).
 
     ``pending_same`` / ``rejected_same`` are existing versions with that very text: the watch
-    agent proposes only when both are None, so a pending change is not duplicated and a
-    rejected one is never raised again.
+    agent proposes only when both are None, so a pending change is not duplicated and a text
+    once rejected (or approved and later revoked) is never raised again.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -559,3 +564,50 @@ class ReviewContext(BaseModel):
     in_force: ComplianceRuleRecord | None
     others: list[ComplianceRuleRecord]
     history: list[str]
+
+
+# --------------------------------------------------------------------------- governance (Phase 11)
+
+
+class Reviewer(BaseModel):
+    """A person allowed to take the human decisions (``REVIEWERS`` in the settings)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    email: EmailAddress | None = None
+
+    def __str__(self) -> str:
+        return self.name if self.email is None else f"{self.name} <{self.email}>"
+
+
+class CaseRunRecord(BaseModel):
+    """One supervised clearance run, as the dashboards list it."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    run_id: str
+    shipment_id: UUID
+    as_of: date
+    state: RunState
+    awaiting_rule_ids: list[UUID]
+    detail: str | None
+    started_by: str
+    started_at: datetime
+    updated_at: datetime
+
+
+class FilingDecisionRecord(BaseModel):
+    """A reviewer's final decision at a run's filing gate, with the checklist they saw."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    id: UUID
+    run_id: str
+    shipment_id: UUID
+    decision: RuleDecision
+    reviewer: str
+    note: str | None
+    ready_for_clearance: bool
+    checklist: dict[str, Any]
+    decided_at: datetime

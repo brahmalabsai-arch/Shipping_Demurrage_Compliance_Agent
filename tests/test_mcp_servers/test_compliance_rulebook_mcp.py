@@ -21,6 +21,7 @@ TOOLS_TESTED = {
     "decide",
     "get_review_context",
     "list_bulletin_drift",
+    "revoke_decision",
 }
 KEY = "HSN-8708-duty"
 
@@ -129,3 +130,24 @@ async def test_review_context_and_drift_over_mcp(
     assert structured(drift_after)["result"][0]["rejected_same"]["decision_note"] == (
         "awaiting notification"
     )
+
+
+async def test_revoke_decision_over_mcp(seeded: None, direct: Any) -> None:
+    v1 = direct(lambda s: svc.get_current_rule(s, KEY))
+    async with connect(mcp) as client:
+        reasonless = await client.call_tool(
+            "revoke_decision", {"rule_id": str(v1.id), "reviewer": "a.sharma", "reason": " "}
+        )
+        revoked = await client.call_tool(
+            "revoke_decision",
+            {"rule_id": str(v1.id), "reviewer": "a.sharma", "reason": "seeded in error"},
+        )
+        again = await client.call_tool(
+            "revoke_decision", {"rule_id": str(v1.id), "reviewer": "a.sharma", "reason": "x"}
+        )
+
+    assert_tool_error(reasonless, "InvalidDecisionError")
+    assert_parity(revoked, direct(lambda s: svc.get_rule(s, v1.id)))
+    assert structured(revoked)["status"] == "revoked"
+    assert structured(revoked)["decided_by"] == v1.decided_by
+    assert_tool_error(again, "RuleNotInForceError")

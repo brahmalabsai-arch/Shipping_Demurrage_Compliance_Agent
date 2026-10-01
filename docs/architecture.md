@@ -63,13 +63,14 @@ capstone-customs-copilot/
 │   ├── mcp_clients.py                # open_toolbox: an agent's MCP servers, typed tool calls
 │   ├── guarded_llm.py                # LLM prose guard (no invented numbers) + fallback reason
 │   ├── ist.py                        # IST business days (today_ist, ist_day)
-│   ├── graph.py                      # top-level StateGraph wiring all agents
+│   ├── graph.py                      # the analysis pipeline (add_pipeline) + guarded()
+│   ├── checkpoint.py                 # PostgresSaver (sync, threaded) + per-run advisory lock
 │   ├── regulatory_watch_agent.py
 │   ├── document_verification_agent.py
 │   ├── demurrage_risk_agent.py
 │   ├── compliance_rag_agent.py
 │   ├── clearance_checklist_agent.py
-│   └── supervisor.py
+│   └── supervisor.py                 # pipeline + compliance/filing gates (interrupt/resume)
 ├── rag/
 │   ├── models.py                     # BGE embedder + MiniLM cross-encoder (lazy), warm_up()
 │   ├── store.py                      # the Chroma collection (one entry per rule_key in force)
@@ -109,7 +110,9 @@ container_type    TEXT               -- '20ft','40ft','40hc','20rf','40rf' (CHEC
                   -- required: picks the demurrage tariff (added in Phase 7, migration 0007)
 status            ENUM('quoted','booked','in_transit','docked','under_review','cleared','held','closed','cancelled')
                   -- 'cancelled' is terminal; reachable only before docking. Allowed moves:
-                  -- services/shipping_service.py::TRANSITIONS
+                  -- services/shipping_service.py::TRANSITIONS. 'under_review -> cleared' only via
+                  -- shipping_service.clear_shipment citing an approved filing decision
+                  -- (Phase 11; trigger shipping.guard_clearance() enforces it in Postgres)
 cargo_type        TEXT
 hs_code           TEXT
 declared_qty      NUMERIC
@@ -201,7 +204,7 @@ revision_of     UUID NULL FK -> gazetted_rates.id   -- handles mid-period correc
 id             UUID PK
 rule_key       TEXT           -- stable identifier across versions, e.g. 'HSN-8708-duty'
 version        INTEGER
-status         ENUM('approved','pending','rejected')
+status         ENUM('approved','pending','rejected','revoked')  -- 'revoked': Phase 11
 content        TEXT           -- the rule text, embedded into Chroma on approval
 hs_codes       TEXT[]
 effective_date DATE
@@ -212,6 +215,9 @@ created_at     TIMESTAMPTZ DEFAULT now()
 decided_by     TEXT NULL      -- human reviewer identifier
 decided_at     TIMESTAMPTZ NULL
 decision_note  TEXT NULL      -- the reviewer's reason; required to reject (migration 0006)
+revoked_by     TEXT NULL      -- a later revocation of the approval in force (migration 0008):
+revoked_at     TIMESTAMPTZ NULL  -- set together, once, with a reason, by revoke_decision only;
+revoke_note    TEXT NULL      -- the decision fields above are never rewritten
 -- UNIQUE (rule_key, version); CHECK version >= 1; hs_codes '{}' = applies to all goods.
 -- UNIQUE INDEX (rule_key) WHERE status='approved' AND superseded_by IS NULL
 --   → at most one version in force per rule.
@@ -225,7 +231,30 @@ decision_note  TEXT NULL      -- the reviewer's reason; required to reject (migr
 --   since it (other proposals: pending/superseded, or rejected with reason), shared by the
 --   Compliance page and the review email. compliance_service.bulletin_drift() lists rules where
 --   the latest scanned bulletin differs (beyond whitespace/case) from the rule in force, noting
---   an identical pending or rejected version.
+--   an identical pending or rejected (or revoked) version — never re-proposed.
+-- Revocation (Phase 11, compliance_service.revoke_decision): only the version in force,
+--   approved -> revoked, audited compliance_rule.revoked (+ .reinstated); the version it had
+--   superseded gets superseded_by = NULL again (the trigger allows that only when the successor
+--   is revoked) and is back in force; the RAG index follows after commit.
+```
+
+### 3.10 `governance.case_runs` / `governance.filing_decisions` (Phase 11, migration `0008`)
+```
+case_runs:        run_id TEXT PK (= LangGraph thread_id), shipment_id UUID FK, as_of DATE,
+                  state ENUM run_state('running','awaiting_compliance','awaiting_filing',
+                  'filed','filing_rejected','blocked','not_fileable','stopped','failed'),
+                  awaiting_rule_ids UUID[] (the compliance gate's wait), detail TEXT,
+                  started_by TEXT, started_at, updated_at
+                  -- UNIQUE INDEX (shipment_id) WHERE state is open → one open run per shipment;
+                  -- terminal states are final (governance_service.update_run)
+filing_decisions: id UUID PK, run_id TEXT UNIQUE FK, shipment_id UUID FK,
+                  decision ENUM('approve','reject'), reviewer TEXT, note TEXT,
+                  ready_for_clearance BOOLEAN, checklist JSONB (what the reviewer saw),
+                  decided_at TIMESTAMPTZ
+                  -- append-only (trigger); CHECKs: reviewer named; a rejection has a reason;
+                  -- an approval only for a ready checklist
+checkpoints.*     LangGraph PostgresSaver tables (schema from 0008, tables from saver.setup();
+                  ignored by alembic/env.py)
 ```
 
 ### 3.8 `bulletin.publication` / `bulletin.snapshots` / `bulletin.change_log`
@@ -283,7 +312,7 @@ tool declares its return type, so results travel as **structured content** (a mo
 JSON object; lists / optional values as `{"result": ...}`) — the Phase 5 parity tests compare
 that payload byte-for-byte (canonical JSON) with the direct service call. Tool names are
 verb-first (`get_ list_ create_ update_ propose_ decide send_ resolve_`, plus the contract's
-`search_` and `diff_`) and unique across servers, because agents load several servers at once.
+`search_` and `diff_`, and Phase 11's `revoke_` and `clear_`) and unique across servers, because agents load several servers at once.
 Dates are `as_of` everywhere (the contract's `resolve_rate(pair, date, stage)` is
 `resolve_rate(pair, as_of, stage, ...)`). Each server mirrors its dashboard's operations
 (FR8: every domain readable *and* writable through both).
@@ -294,7 +323,8 @@ Dates are `as_of` everywhere (the contract's `resolve_rate(pair, date, stage)` i
 `create_shipment(shipment: ShipmentCreate)`, `update_shipment(shipment_id, changes:
 ShipmentUpdate)`, `update_status(shipment_id, status)`, `create_document(shipment_id, document:
 DocumentCreate)`, `update_document(document_id, changes: DocumentAmend)` (re-issues a new
-version).
+version), `clear_shipment(shipment_id, filing_decision_id)` (Phase 11: the only way to
+`cleared` — `update_status` refuses it with `ClearanceRequiresApprovalError`).
 
 **`demurrage_rates_mcp`** — `get_rate(port_code, container_type, as_of) -> PortRateRecord`,
 `get_demurrage_charge(port_code, container_type, as_of, days_in_port) -> DemurrageCharge`,
@@ -318,7 +348,8 @@ holds pending/rejected/superseded text, each hit re-checked in Postgres; `method
 to `pending`; there is no status field), `decide(rule_id, decision: "approve"|"reject",
 reviewer, note?)` (only path to `approved`; a named reviewer is required, and a reason to
 reject), `get_review_context(rule_id) -> ReviewContext`, `list_bulletin_drift() ->
-list[RuleDrift]` (Phase 6).
+list[RuleDrift]` (Phase 6), `revoke_decision(rule_id, reviewer, reason)` (Phase 11: withdraws
+the approval in force as a separate act; the version it replaced is back in force).
 
 **`customs_bulletin_mcp`** — `get_current_snapshot()` (latest *scan*),
 `diff_since_last_scan() -> ChangeLogEntryRecord | None` (idempotent),
@@ -447,6 +478,33 @@ A single top-level `StateGraph` with a shared Pydantic state object (`CaseState`
   agent says low/none → a `Conflict` with both signals. `ready_for_clearance` = no blocker, no
   missing input, no conflict (Phase 11's filing gate enforces it). Audited
   `clearance_checklist.completed`. Shipping Ops → "Analyse shipment" shows risk + checklist.
+
+  *As built (Phase 11):* `agents/supervisor.py` compiles `graph.add_pipeline` + two gates
+  with a checkpointer (`agents/checkpoint.py`: LangGraph's **sync** `PostgresSaver` in the
+  `checkpoints` schema, async methods run in threads — psycopg's async connections need a
+  Selector event loop on Windows, the stdio MCP subprocesses need the Proactor one; the
+  serializer only deserializes `CaseState`'s own classes; `thread_id = run_id`).
+  **Compliance gate** (after the checklist): every *pending* rule proposal covering the
+  shipment's HS code (supervisor toolbox, `list_pending`) opens one `interrupt()` in a parallel
+  `Send` branch (`await_compliance_decision`). Only `compliance_service.decide` decides it
+  (Compliance page, any process); `resume_after_compliance_decision(run_id, rule_id)` resumes
+  — refused while the rule is pending (`DecisionPendingError`) — and the gate re-reads the rule
+  from the rulebook (the resume carries no decision). Approved (or revoked) → the compliance
+  agent and the checklist run again (`reassess_after_rule_change`); rejected → final for that
+  proposal (`supervisor.compliance_rejected`), the run continues on the rulebook in force.
+  **Filing gate**: only a ready checklist (no blocker, data gap, missing input, conflict) of a
+  docked / under-review shipment reaches it — else the run ends `blocked` / `not_fileable`.
+  `resume_after_filing_approval(run_id, decision, reviewer, note)` (a registered reviewer —
+  `REVIEWERS` setting, `UnknownReviewerError`) records the `governance.filing_decisions` row,
+  then resumes with its id; any other resume value is refused and the gate waits again (each
+  gate calls `interrupt()` once per execution; a refusal routes back to it). Rejected → run
+  `filing_rejected` (final; a new run is needed). Approved → `file_clearance`: re-checks the
+  case (`IncompleteCaseError` before any MCP call), refuses if the documents changed since the
+  analysis, then `update_status(under_review)` if docked and `clear_shipment` over
+  `shipping_records_mcp` (actor `supervisor`). `governance.case_runs` mirrors each run's state
+  for the dashboards (Shipping Ops → Clearance run; `python -m scripts.clearance`); resumptions
+  of one run are serialised by a Postgres advisory lock on the run id. Only one open run per
+  shipment; `abandon_clearance_run` ends a stuck one.
 
 **Human-in-the-loop**: implemented with LangGraph's native `interrupt()` inside `supervisor.py` at exactly two points — before `compliance_rulebook_mcp.decide()` is allowed to fire, and before a shipment can transition to `cleared`/filed. Graph state is persisted via `PostgresSaver` (LangGraph checkpointer, same Postgres instance), so an interrupted run survives process restarts and resumes cleanly when a human acts through the dashboard — this reuses the HITL pattern already proven in the delivery control tower project.
 

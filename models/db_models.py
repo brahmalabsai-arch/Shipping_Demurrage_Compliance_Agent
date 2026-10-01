@@ -28,13 +28,22 @@ from sqlalchemy import (
     Numeric,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, ExcludeConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
 
-from models.enums import ContainerType, DocType, LockType, RuleStatus, ShipmentStatus
+from models.enums import (
+    ContainerType,
+    DocType,
+    LockType,
+    RuleDecision,
+    RuleStatus,
+    RunState,
+    ShipmentStatus,
+)
 
 # Deterministic constraint names so Alembic autogenerate produces stable, reviewable migrations.
 NAMING_CONVENTION = {
@@ -45,7 +54,19 @@ NAMING_CONVENTION = {
     "pk": "pk_%(table_name)s",
 }
 
-DOMAIN_SCHEMAS = ("shipping", "demurrage", "fx", "compliance", "bulletin", "audit")
+DOMAIN_SCHEMAS = (
+    "shipping",
+    "demurrage",
+    "fx",
+    "compliance",
+    "bulletin",
+    "audit",
+    "governance",
+)
+
+# LangGraph's checkpoint tables (Phase 11). The migration creates the schema; the library's own
+# ``PostgresSaver.setup()`` creates and migrates its tables, which Alembic therefore ignores.
+CHECKPOINT_SCHEMA = "checkpoints"
 
 
 class Base(DeclarativeBase):
@@ -351,7 +372,9 @@ class ComplianceRule(Base):
     lifecycle in Postgres: inserts must be pending and undecided, a decision happens once and
     names its reviewer (a rejection also its reason — ``decision_note``, migration ``0006``),
     only an approved row can be superseded, the rule text never changes and rows are never
-    deleted. At most one approved, unsuperseded version per ``rule_key``.
+    deleted. At most one approved, unsuperseded version per ``rule_key``. Migration ``0008``
+    adds revocation: only the version in force can move ``approved -> revoked`` (with who, when
+    and why, in their own columns), and only then may the version it superseded be reinstated.
     """
 
     __tablename__ = "rules"
@@ -384,6 +407,84 @@ class ComplianceRule(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The reviewer's reason — required for a rejection (trigger, migration 0006).
     decision_note: Mapped[str | None] = mapped_column(Text)
+    # A later revocation of the approval (Phase 11, migration 0008): recorded beside the
+    # decision, never over it; all three are set together, once, with a reason.
+    revoked_by: Mapped[str | None] = mapped_column(Text)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoke_note: Mapped[str | None] = mapped_column(Text)
+
+
+# --------------------------------------------------------------------------- governance
+
+
+class CaseRun(Base):
+    """One supervised clearance run of a shipment (Phase 11) — the index the dashboards read to
+    see which run waits at which human gate. The run's full state lives in the LangGraph
+    checkpoint (``thread_id = run_id``); its history is in ``audit.events``.
+
+    At most one open run (``running`` / ``awaiting_*``) per shipment, so two runs can never race
+    to clear the same container. Terminal states are final (``governance_service``).
+    """
+
+    __tablename__ = "case_runs"
+    __table_args__ = (
+        Index(
+            "uq_case_runs_open_shipment",
+            "shipment_id",
+            unique=True,
+            postgresql_where=text("state IN ('running', 'awaiting_compliance', 'awaiting_filing')"),
+        ),
+        {"schema": "governance"},
+    )
+
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    shipment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("shipping.shipments.id"), index=True)
+    as_of: Mapped[date] = mapped_column(Date)
+    state: Mapped[RunState] = mapped_column(_pg_enum(RunState, "run_state", "governance"))
+    # The pending rule versions the compliance gate waits on (empty at any other state).
+    awaiting_rule_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(Uuid), server_default=text("'{}'")
+    )
+    detail: Mapped[str | None] = mapped_column(Text)  # checklist summary, or why it ended
+    started_by: Mapped[str] = mapped_column(Text)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now(), onupdate=utcnow
+    )
+
+
+class FilingDecision(Base):
+    """A reviewer's final approve/reject at a run's filing gate (Phase 11). Append-only (trigger,
+    migration ``0008``); one per run. The only thing that can move a shipment to ``cleared`` is
+    ``shipping_service.clear_shipment`` citing an approval here — also enforced by a trigger on
+    ``shipping.shipments``. An approval is impossible for a checklist that is not ready."""
+
+    __tablename__ = "filing_decisions"
+    __table_args__ = (
+        UniqueConstraint("run_id"),
+        CheckConstraint("btrim(reviewer) <> ''", name="names_reviewer"),
+        CheckConstraint(
+            "decision <> 'reject' OR coalesce(btrim(note), '') <> ''", name="rejection_has_reason"
+        ),
+        CheckConstraint(
+            "decision <> 'approve' OR ready_for_clearance", name="approval_needs_ready_case"
+        ),
+        {"schema": "governance"},
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    run_id: Mapped[str] = mapped_column(ForeignKey("governance.case_runs.run_id"))
+    shipment_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("shipping.shipments.id"), index=True)
+    decision: Mapped[RuleDecision] = mapped_column(_pg_enum(RuleDecision, "decision", "governance"))
+    reviewer: Mapped[str] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
+    ready_for_clearance: Mapped[bool] = mapped_column(Boolean)
+    checklist: Mapped[dict[str, Any]] = mapped_column(JSONB)  # what the reviewer saw
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, server_default=func.now()
+    )
 
 
 # --------------------------------------------------------------------------- audit

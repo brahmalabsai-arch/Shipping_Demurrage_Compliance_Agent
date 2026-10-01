@@ -213,3 +213,28 @@ def test_rrf_sums_reciprocal_ranks() -> None:
 
     assert [key for key, _ in fused] == ["b", "c", "a"]
     assert fused[0][1] == pytest.approx(1 / 62 + 1 / 61)
+
+
+def test_a_revocation_puts_the_reinstated_version_back_in_the_index(
+    seeded: None, session_factory: sessionmaker[Session]
+) -> None:
+    v2 = propose(session_factory, PENDING_TEXT)
+    with session_factory() as session, session.begin():
+        svc.decide(session, v2.id, RuleDecision.APPROVE, REVIEWER)
+    with session_factory() as session, session.begin():
+        svc.revoke_decision(session, v2.id, REVIEWER, "notification withdrawn")
+
+    _, meta = indexed()[KEY]
+    assert meta["version"] == 1
+    assert all("Agriculture Infrastructure" not in d for d, _ in indexed().values())
+
+
+def test_revoking_the_only_version_drops_the_rule_from_the_index(
+    seeded: None, session_factory: sessionmaker[Session]
+) -> None:
+    with session_factory() as session, session.begin():
+        v1 = svc.get_current_rule(session, "ORG-KR-CEPA")
+        svc.revoke_decision(session, v1.id, REVIEWER, "CEPA suspended")
+
+    assert "ORG-KR-CEPA" not in indexed()
+    assert KEY in indexed()

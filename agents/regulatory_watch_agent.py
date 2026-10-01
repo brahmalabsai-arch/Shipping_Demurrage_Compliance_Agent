@@ -41,7 +41,7 @@ from agents.audit import record_run_event
 from agents.guarded_llm import guarded_reply
 from agents.mcp_clients import McpToolbox
 from agents.state import SectionSummary, WatchState
-from models.enums import SectionChangeKind
+from models.enums import RuleStatus, SectionChangeKind
 from models.schemas import (
     BulletinSection,
     ChangeLogEntryRecord,
@@ -178,7 +178,12 @@ def _against_rule_in_force(drift: RuleDrift) -> SectionChange:
 def _skip_reason(drift: RuleDrift) -> str | None:
     if drift.pending_same is not None:
         return f"{drift.rule_key}: already pending as v{drift.pending_same.version}"
-    if (rejected := drift.rejected_same) is not None:
+    if (rejected := drift.rejected_same) is not None and rejected.status is RuleStatus.REVOKED:
+        return (
+            f"{drift.rule_key}: approved as v{rejected.version}, then revoked by "
+            f"{rejected.revoked_by} ({rejected.revoke_note})"
+        )
+    if rejected is not None:
         return (
             f"{drift.rule_key}: rejected before as v{rejected.version} by {rejected.decided_by}"
             f" ({rejected.decision_note or 'no reason recorded'})"

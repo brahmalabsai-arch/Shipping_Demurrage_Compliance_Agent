@@ -9,6 +9,10 @@ Database tests run against the disposable ``POSTGRES_TEST_DB`` (never the app da
   ``session_scope()`` only releases a SAVEPOINT inside that transaction.
 
 Any test using these fixtures is auto-marked ``db`` (CI runs it in the Postgres job).
+
+The supervisor's LangGraph checkpoints (Phase 11) are written on their own autocommit connection
+and cannot be rolled back: the ``checkpoints`` fixture points them at the test database and
+empties the checkpoint tables afterwards.
 """
 
 import threading
@@ -22,13 +26,16 @@ from pydantic import ValidationError
 from sqlalchemy import Connection, Engine, create_engine, event, text
 from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
+from agents import checkpoint
 from config.settings import PROJECT_ROOT, get_settings
-from models.db_models import DOMAIN_SCHEMAS
+from models.db_models import CHECKPOINT_SCHEMA, DOMAIN_SCHEMAS
 from rag import models as rag_models
 from services import db as db_module
 from tests.fixtures.rag import FakeEmbedder, FakeReranker
 
-DB_FIXTURES = {"db_engine", "db_connection", "session_factory", "db_session"}
+DB_FIXTURES = {"db_engine", "db_connection", "session_factory", "db_session", "checkpoints"}
+# The registered reviewers every test sees (``REVIEWERS``); tests decide as these people.
+TEST_REVIEWERS = "Asha Rao <asha.rao@example.com>; Vikram Shah <vikram.shah@example.com>"
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -57,6 +64,7 @@ def _no_external_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     monkeypatch.setattr(settings, "groq_api_key", None)
     monkeypatch.setattr(settings, "email_backend", "outbox")
     monkeypatch.setattr(settings, "outbox_path", tmp_path / "outbox")
+    monkeypatch.setattr(settings, "reviewers", TEST_REVIEWERS)
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +89,8 @@ def _isolated_rag_index(
 def db_engine() -> Iterator[Engine]:
     engine = create_engine(get_settings().test_database_url)
     with engine.begin() as conn:
-        conn.execute(text(f"DROP SCHEMA IF EXISTS {', '.join(DOMAIN_SCHEMAS)} CASCADE"))
+        schemas = ", ".join((*DOMAIN_SCHEMAS, CHECKPOINT_SCHEMA))
+        conn.execute(text(f"DROP SCHEMA IF EXISTS {schemas} CASCADE"))
         conn.execute(text("DROP TABLE IF EXISTS public.alembic_version"))
     with engine.begin() as conn:
         cfg = _alembic(conn)
@@ -137,3 +146,21 @@ def session_factory(
 def db_session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
     with session_factory() as session:
         yield session
+
+
+@pytest.fixture
+def checkpoints(db_engine: Engine, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Supervisor checkpoints and run locks on the test database, emptied after the test."""
+    monkeypatch.setattr(checkpoint, "DATABASE", get_settings().postgres_test_db)
+    yield
+    with db_engine.begin() as conn:
+        tables = conn.scalars(
+            text(
+                "SELECT tablename FROM pg_tables WHERE schemaname = :schema"
+                " AND tablename <> 'checkpoint_migrations'"
+            ),
+            {"schema": CHECKPOINT_SCHEMA},
+        ).all()
+        if tables:
+            names = ", ".join(f"{CHECKPOINT_SCHEMA}.{t}" for t in tables)
+            conn.execute(text(f"TRUNCATE {names}"))

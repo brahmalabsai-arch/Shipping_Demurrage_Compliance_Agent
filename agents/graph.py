@@ -6,7 +6,9 @@
 Both middle branches read what verification found (the risk weighs the discrepancies; the
 compliance agent asks the rulebook about them) and are independent of each other, so LangGraph
 runs them in parallel, each writing only its own ``CaseState`` fields; the checklist waits for
-both (fan-in). Phase 11 adds the supervisor's human gates.
+both (fan-in). ``analyse_shipment`` runs exactly that (read-only, not checkpointed); the Phase 11
+supervisor (``agents/supervisor.py``) wires the same pipeline (:func:`add_pipeline`) in front of
+its human gates.
 
 Each agent keeps its own role: it gets its own MCP toolbox (only its servers, its own actor
 name on every call) through ``config["configurable"][<agent name>]``. One ``run_id`` threads
@@ -75,9 +77,9 @@ def guarded(agent: ModuleType) -> Node:
     return run
 
 
-def build_graph() -> CompiledStateGraph[CaseState, Any, CaseState, CaseState]:
-    """Verification first; demurrage & risk and compliance in parallel; then the checklist."""
-    graph = StateGraph(CaseState)
+def add_pipeline(graph: StateGraph[CaseState, Any, CaseState, CaseState]) -> None:
+    """Add the four agents from START up to the checklist node (the caller wires what follows):
+    verification first; demurrage & risk and compliance in parallel; then the checklist."""
     for agent in (verification, risk, compliance):
         graph.add_node(agent.AGENT, guarded(agent))
     graph.add_node(checklist.AGENT, checklist.clearance_checklist_agent)
@@ -85,6 +87,12 @@ def build_graph() -> CompiledStateGraph[CaseState, Any, CaseState, CaseState]:
     graph.add_edge(verification.AGENT, risk.AGENT)
     graph.add_edge(verification.AGENT, compliance.AGENT)
     graph.add_edge([risk.AGENT, compliance.AGENT], checklist.AGENT)  # fan-in: waits for both
+
+
+def build_graph() -> CompiledStateGraph[CaseState, Any, CaseState, CaseState]:
+    """The analysis pipeline alone, ending at the checklist."""
+    graph = StateGraph(CaseState)
+    add_pipeline(graph)
     graph.add_edge(checklist.AGENT, END)
     return graph.compile()
 

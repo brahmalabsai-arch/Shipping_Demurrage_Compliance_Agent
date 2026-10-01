@@ -4,15 +4,19 @@ The single code path to rule data for the Compliance dashboard, ``compliance_rul
 and the agents. Governance guarantees (problem statement FR6/FR7):
 
 * ``propose_change`` always stores a new version as ``pending`` — it has no status parameter.
-* ``decide`` is the **only** function that changes ``status`` (a test scans the codebase for
-  any other assignment), and it requires a named human reviewer — and, to reject, a reason
-  (``decision_note``). A decision is final.
+* ``decide`` is the **only** function that decides a proposal (a test scans the codebase for
+  any other status assignment), and it requires a named human reviewer — and, to reject, a
+  reason (``decision_note``). A decision is final.
+* ``revoke_decision`` (Phase 11) withdraws the approval of the version in force as a separate,
+  audited act: ``status`` becomes ``revoked`` with its own who/when/why columns, the original
+  decision fields are never rewritten, and the version it had superseded is back in force.
 * Approving version N supersedes the currently approved version of that ``rule_key``; pending
   proposals of the same key are never touched by another proposal's decision, and an older
   proposal can no longer be approved once a newer version is (``StaleProposalError``).
 
-An approval is embedded into the RAG index only after its transaction commits (never a
-pending or rejected version); ``search_rules`` retrieves from that index (Phase 9).
+An approval (or a revocation) refreshes the RAG index only after its transaction commits — the
+index always holds exactly the versions in force (never a pending, rejected or revoked one);
+``search_rules`` retrieves from that index (Phase 9).
 
 A trigger (migrations ``0004``/``0006``) enforces the same lifecycle in Postgres. Rule versions
 are never edited or deleted: a change is a new version, and history is the chain of
@@ -51,6 +55,7 @@ from services.errors import (
     InvalidDecisionError,
     RuleAlreadyDecidedError,
     RuleNotFoundError,
+    RuleNotInForceError,
     StaleProposalError,
 )
 
@@ -138,14 +143,15 @@ def sync_rag_index(session: Session) -> ingest.SyncReport:
     return ingest.sync_index(list_approved(session))
 
 
-# The index is not transactional with Postgres: an approval is embedded only once its
-# transaction has committed, from a fresh read of the rule (still approved and in force).
-_TO_INDEX = "compliance_rules_to_index"
+# The index is not transactional with Postgres: after an approval or a revocation commits, the
+# entry of each touched rule_key is refreshed from a fresh read — the version now in force is
+# (re-)embedded, or the entry is dropped if the rule has none.
+_TO_INDEX = "compliance_rule_keys_to_index"
 _HOOKED = "compliance_rag_hooks"
 
 
-def _index_after_commit(session: Session, rule_id: UUID) -> None:
-    session.info.setdefault(_TO_INDEX, []).append(rule_id)
+def _index_after_commit(session: Session, rule_key: str) -> None:
+    session.info.setdefault(_TO_INDEX, []).append(rule_key)
     if session.info.get(_HOOKED):
         return
     session.info[_HOOKED] = True
@@ -159,16 +165,17 @@ def _forget_on_rollback(session: Session, previous_transaction: SessionTransacti
 
 
 def _index_committed(session: Session) -> None:
-    rule_ids = session.info.pop(_TO_INDEX, [])
-    if not rule_ids:
+    rule_keys = list(dict.fromkeys(session.info.pop(_TO_INDEX, [])))
+    if not rule_keys:
         return
     try:
         with session_scope() as fresh:
-            rules = [get_rule(fresh, rule_id) for rule_id in rule_ids]
-        in_force = [r for r in rules if r.status is RuleStatus.APPROVED and not r.superseded_by]
+            current = {key: _current_approved(fresh, key) for key in rule_keys}
+            in_force = [ComplianceRuleRecord.model_validate(r) for r in current.values() if r]
         ingest.index_rules(in_force)
+        ingest.remove_rules([key for key, row in current.items() if row is None])
     except Exception:  # never undo a committed decision; `scripts.index_rulebook` repairs
-        logger.exception("rag.index_failed", rule_ids=[str(i) for i in rule_ids])
+        logger.exception("rag.index_failed", rule_keys=rule_keys)
 
 
 def get_current_rule(session: Session, rule_key: str) -> ComplianceRuleRecord:
@@ -331,7 +338,79 @@ def decide(
     )
     session.flush()
     if record.status is RuleStatus.APPROVED:  # embedded after commit; a rejection never is
-        _index_after_commit(session, record.id)
+        _index_after_commit(session, record.rule_key)
+    return record
+
+
+def revoke_decision(
+    session: Session, rule_id: UUID, reviewer: str, reason: str
+) -> ComplianceRuleRecord:
+    """Withdraw the approval of the version in force — a new, separate act, never an edit.
+
+    The rule's ``status`` becomes ``revoked`` and ``revoked_by`` / ``revoked_at`` /
+    ``revoke_note`` record who, when and why; ``decided_by`` / ``decided_at`` /
+    ``decision_note`` keep the original approval. The version it had superseded (if any) is
+    back in force; without one the rule has no version in force until a new proposal is
+    approved. Audited as ``compliance_rule.revoked`` (+ ``compliance_rule.reinstated``); the RAG
+    index follows after commit. A revocation is final.
+
+    Raises ``InvalidDecisionError`` without a reviewer or a reason, ``RuleNotFoundError`` for an
+    unknown id and ``RuleNotInForceError`` unless the rule is the approved version in force.
+    """
+    reviewer = reviewer.strip()
+    reason = (reason or "").strip()
+    if not reviewer:
+        raise InvalidDecisionError("a revocation must name the human reviewer")
+    if not reason:
+        raise InvalidDecisionError("a revocation must give a reason")
+    row = session.get(ComplianceRule, rule_id, with_for_update=True)
+    if row is None:
+        raise RuleNotFoundError(f"no compliance rule with id {rule_id}")
+    if row.status is not RuleStatus.APPROVED or row.superseded_by is not None:
+        state = "superseded" if row.superseded_by is not None else row.status.value
+        raise RuleNotInForceError(
+            f"{row.rule_key} v{row.version} is {state}; only the version in force can be revoked"
+        )
+    predecessor = session.scalars(
+        select(ComplianceRule).where(ComplianceRule.superseded_by == row.id).with_for_update()
+    ).one_or_none()
+
+    row.status = RuleStatus.REVOKED
+    row.revoked_by = reviewer
+    row.revoked_at = utcnow()
+    row.revoke_note = reason
+    session.flush()  # the successor must be revoked before its predecessor is reinstated
+    if predecessor is not None:
+        predecessor.superseded_by = None
+        session.flush()
+    record = ComplianceRuleRecord.model_validate(row)
+
+    audit_service.record(
+        session,
+        actor=reviewer,
+        action="compliance_rule.revoked",
+        entity_type="compliance_rule",
+        entity_id=row.id,
+        payload={
+            "rule_key": row.rule_key,
+            "version": row.version,
+            "note": reason,
+            "approved_by": row.decided_by,
+            "approved_at": row.decided_at,
+            "reinstated": None if predecessor is None else predecessor.id,
+        },
+    )
+    if predecessor is not None:
+        audit_service.record(
+            session,
+            actor=reviewer,
+            action="compliance_rule.reinstated",
+            entity_type="compliance_rule",
+            entity_id=predecessor.id,
+            payload={"rule_key": row.rule_key, "version": predecessor.version, "after": row.id},
+        )
+    session.flush()
+    _index_after_commit(session, record.rule_key)
     return record
 
 
@@ -344,6 +423,16 @@ def _ist_day(rule: ComplianceRuleRecord, when: str) -> str:
 
 
 def _history_line(other: ComplianceRuleRecord, proposal: ComplianceRuleRecord) -> str | None:
+    if other.status is RuleStatus.REVOKED:
+        revoked_on = (
+            "" if other.revoked_at is None
+            else other.revoked_at.astimezone(BUSINESS_TZ).strftime("%d %b %Y")
+        )  # fmt: skip
+        return (
+            f"v{other.version} was approved by {other.decided_by} on "
+            f"{_ist_day(other, 'decided')}, then revoked by {other.revoked_by} on {revoked_on}: "
+            f'"{other.revoke_note}"'
+        )
     if other.status is RuleStatus.REJECTED:
         return (
             f"v{other.version} (proposed {_ist_day(other, 'created')}) was rejected by "
@@ -396,7 +485,8 @@ def bulletin_drift(session: Session) -> list[RuleDrift]:
 
     Compares the scan's view (not the live publication — Option A) with the rulebook, so a
     change is caught even if it happened before the first scan. Each drift says whether that
-    exact text is already pending or was rejected before. Raises
+    exact text is already pending or was turned down before — rejected, or approved and later
+    revoked (``rejected_same``; neither is ever proposed again). Raises
     ``BulletinSnapshotNotFoundError`` before the first scan.
     """
     sections = bulletin_service.get_latest_sections(session)
@@ -421,7 +511,8 @@ def bulletin_drift(session: Session) -> list[RuleDrift]:
                 ),
                 rejected_same=next(
                     (v for v in latest_first
-                     if v.status is RuleStatus.REJECTED and _same(v, section)), None
+                     if v.status in (RuleStatus.REJECTED, RuleStatus.REVOKED)
+                     and _same(v, section)), None
                 ),
             )
         )  # fmt: skip

@@ -19,7 +19,7 @@ import os
 import re
 import sys
 import time
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from typing import Any
 
@@ -44,13 +44,16 @@ _ERROR = re.compile(
 
 
 @asynccontextmanager
-async def stdio_connector(server: str) -> AsyncIterator[ClientSession]:
-    """Start ``mcp_servers.<server>.server`` as a subprocess and talk MCP over its stdio."""
+async def stdio_connector(
+    server: str, env: Mapping[str, str] | None = None
+) -> AsyncIterator[ClientSession]:
+    """Start ``mcp_servers.<server>.server`` as a subprocess and talk MCP over its stdio
+    (``env`` adds or overrides variables of this process's environment)."""
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", f"mcp_servers.{server}.server"],
         cwd=str(PROJECT_ROOT),
-        env=dict(os.environ),
+        env={**os.environ, **(env or {})},
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
         await session.initialize()

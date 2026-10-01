@@ -3,16 +3,19 @@
 The database URL comes from ``config.Settings`` (never from alembic.ini), and the target metadata
 is ``models.db_models.Base.metadata``. Tables live in per-domain Postgres schemas, so
 ``include_schemas=True`` lets autogenerate see all of them; each phase's migration creates the
-schema it introduces. The ``alembic_version`` table stays in ``public``.
+schema it introduces. The ``alembic_version`` table stays in ``public``. The ``checkpoints``
+schema (Phase 11) holds LangGraph's checkpoint tables, which the library creates and migrates
+itself (``PostgresSaver.setup()``) — autogenerate/``alembic check`` ignore it.
 """
 
 from logging.config import fileConfig
+from typing import Any
 
 from alembic import context
 from sqlalchemy import Connection, create_engine, pool
 
 from config.settings import get_settings
-from models.db_models import Base
+from models.db_models import CHECKPOINT_SCHEMA, Base
 
 config = context.config
 
@@ -20,6 +23,11 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+
+def include_name(name: str | None, type_: str, parent_names: Any) -> bool:
+    """Leave the library-managed checkpoint schema out of comparisons."""
+    return not (type_ == "schema" and name == CHECKPOINT_SCHEMA)
 
 
 def run_migrations_offline() -> None:
@@ -30,6 +38,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         include_schemas=True,
+        include_name=include_name,
         compare_type=True,
     )
 
@@ -42,6 +51,7 @@ def _run_with(connection: Connection) -> None:
         connection=connection,
         target_metadata=target_metadata,
         include_schemas=True,
+        include_name=include_name,
         compare_type=True,
     )
     with context.begin_transaction():

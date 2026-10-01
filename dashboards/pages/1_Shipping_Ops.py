@@ -1,11 +1,15 @@
 """Shipping Ops — create, edit and advance shipments; attach and amend their documents; run
-the Document Verification agent, or the pipeline with the Demurrage & Risk agent, on a shipment.
+the Document Verification agent, or the pipeline with the Demurrage & Risk agent, on a shipment;
+and drive supervised clearance runs through their human gates (Phase 11).
 
 Every read and write goes through ``services.shipping_service`` (the same functions
 ``shipping_records_mcp`` calls), so the dashboard and the agents can never disagree about the
 data. Nothing is deleted: shipments are cancelled/closed via status, documents are amended into
 new versions. Widget keys are suffixed with the container id so switching shipments re-seeds
 each form from the database.
+
+A shipment is never moved to ``cleared`` here by hand: only a clearance run's filing gate, approved
+by a registered reviewer (sidebar), files it (``agents.supervisor``).
 """
 
 import asyncio
@@ -14,9 +18,10 @@ from typing import Any
 
 import streamlit as st
 
-from agents import document_verification_agent, graph
+from agents import document_verification_agent, graph, supervisor
 from agents.state import CaseState, ChecklistItem, Discrepancy
 from dashboards.ui import (
+    flash,
     fmt_ist,
     ist_to_utc,
     run_action,
@@ -24,8 +29,9 @@ from dashboards.ui import (
     split_ist,
     to_decimal,
 )
-from models.enums import ContainerType, DocType, ShipmentStatus
+from models.enums import ContainerType, DocType, RuleStatus, RunState, ShipmentStatus
 from models.schemas import (
+    CaseRunRecord,
     DocumentAmend,
     DocumentCreate,
     DocumentRecord,
@@ -34,9 +40,10 @@ from models.schemas import (
     ShipmentRecord,
     ShipmentUpdate,
 )
+from services import compliance_service, governance_service
 from services import shipping_service as svc
 from services.db import session_scope
-from services.errors import ShipmentCancelledError
+from services.errors import CustomsCopilotError, ShipmentCancelledError
 
 st.set_page_config(page_title="Shipping Ops", layout="wide")
 
@@ -45,6 +52,7 @@ CONTAINER_TYPES: list[ContainerType] = list(ContainerType)
 DOC_TYPES: list[DocType] = list(DocType)
 START_STATUSES: list[ShipmentStatus] = [ShipmentStatus.QUOTED, ShipmentStatus.BOOKED]
 STATUS_FILTERS: list[str] = ["all", *(s.value for s in ShipmentStatus)]
+REVIEWERS: list[str] = [r.name for r in governance_service.reviewers()]
 
 
 # --------------------------------------------------------------------------- tables
@@ -167,10 +175,12 @@ def render_edit_form(s: ShipmentRecord, actor: str) -> None:
 
 def render_status_controls(s: ShipmentRecord, actor: str) -> None:
     cid = s.container_id
-    allowed = sorted(svc.allowed_transitions(s.status))
+    allowed = sorted(svc.allowed_transitions(s.status) - {ShipmentStatus.CLEARED})
     st.subheader("Lifecycle status")
+    if ShipmentStatus.CLEARED in svc.allowed_transitions(s.status):
+        st.caption("`cleared` is reached only by filing — see *Clearance run* below.")
     if not allowed:
-        st.caption(f"`{s.status.value}` is terminal — no further moves.")
+        st.caption(f"No manual move from `{s.status.value}`.")
         return
     col_pick, col_go = st.columns([3, 1])
     target = col_pick.selectbox(
@@ -414,6 +424,120 @@ def render_risk(s: ShipmentRecord) -> None:
         _show_checklist(state)
 
 
+# --------------------------------------------------------------------------- clearance runs
+
+
+def _run_row(run: CaseRunRecord) -> dict[str, Any]:
+    return {
+        "Run": run.run_id[:8],
+        "State": run.state.value,
+        "Analysis date": run.as_of.isoformat(),
+        "Started": fmt_ist(run.started_at),
+        "By": run.started_by,
+        "Updated": fmt_ist(run.updated_at),
+        "Detail": run.detail or "",
+    }
+
+
+def _drive(label: str, action: Any) -> None:
+    """Run one supervisor call (async; opens the MCP servers), then rerun to show the result."""
+    try:
+        with st.spinner(label):
+            result = asyncio.run(action)
+    except CustomsCopilotError as exc:
+        st.error(f"{type(exc).__name__}: {exc}")
+    except Exception as exc:  # show any failure to the operator
+        st.error(f"Clearance run failed: {type(exc).__name__}: {exc}")
+    else:
+        flash(f"Run {result.run.run_id[:8]}: {result.run.state.value}. {result.run.detail or ''}")
+        st.rerun()
+
+
+def _render_compliance_wait(run: CaseRunRecord) -> None:
+    st.info("Waiting at the **compliance gate**: a proposed rule change covering these goods "
+            "must be decided on the *Compliance* page first.")  # fmt: skip
+    with session_scope() as session:
+        rules = [compliance_service.get_rule(session, rule_id) for rule_id in run.awaiting_rule_ids]
+    for rule in rules:
+        col_rule, col_go = st.columns([3, 1])
+        col_rule.write(f"{rule.rule_key} v{rule.version} — {rule.status.value}")
+        if rule.status is RuleStatus.PENDING:
+            continue
+        if col_go.button("Resume run", key=f"resume_{run.run_id}_{rule.id}"):
+            _drive("Resuming the run (re-asking the rulebook)...",
+                   supervisor.resume_after_compliance_decision(run.run_id, rule.id))  # fmt: skip
+
+
+def _render_filing_wait(run: CaseRunRecord, reviewer: str | None) -> None:
+    st.success("Waiting at the **filing gate**: the checklist is ready for clearance. A "
+               "registered reviewer approves (files the shipment as `cleared`) or rejects "
+               "(final for this run).")  # fmt: skip
+    try:
+        case = asyncio.run(supervisor.inspect_run(run.run_id)).case
+    except Exception as exc:  # show any failure to the operator
+        st.error(f"Could not read the run: {type(exc).__name__}: {exc}")
+        return
+    _show_checklist(case)
+    if reviewer is None:
+        st.warning("Choose yourself as *Reviewer* in the sidebar to decide.")
+        return
+    note = st.text_input("Note (required to reject)", "", key=f"filing_note_{run.run_id}")
+    b1, b2, _ = st.columns([1, 1, 4])
+    if b1.button("Approve filing", key=f"approve_filing_{run.run_id}", type="primary"):
+        _drive("Filing the shipment...",
+               supervisor.resume_after_filing_approval(run.run_id, "approve", reviewer, note))  # fmt: skip
+    if b2.button("Reject filing", key=f"reject_filing_{run.run_id}"):
+        _drive("Recording the rejection...",
+               supervisor.resume_after_filing_approval(run.run_id, "reject", reviewer, note))  # fmt: skip
+
+
+def _render_abandon(run: CaseRunRecord, reviewer: str | None) -> None:
+    with st.expander("Abandon this run"):
+        st.caption("For a run left `running` by a crashed process, or one that should not go on. "
+                   "It ends as `failed`; the shipment can then start a new run.")  # fmt: skip
+        reason = st.text_input("Reason", "", key=f"abandon_reason_{run.run_id}")
+        if st.button("Abandon run", key=f"abandon_{run.run_id}", disabled=reviewer is None):
+            try:
+                supervisor.abandon_clearance_run(run.run_id, reviewer or "", reason)
+            except CustomsCopilotError as exc:
+                st.error(f"{type(exc).__name__}: {exc}")
+            else:
+                flash(f"Run {run.run_id[:8]} abandoned.")
+                st.rerun()
+
+
+def render_clearance(s: ShipmentRecord, actor: str, reviewer: str | None) -> None:
+    """Supervised clearance runs: the pipeline behind the compliance and filing gates."""
+    cid = s.container_id
+    st.subheader("Clearance run")
+    st.caption(
+        "A supervised run analyses the shipment (every agent), then waits for people: first for "
+        "a decision on any pending rule change covering its HS code (Compliance page), then — if "
+        "the checklist is ready and the shipment is docked or under review — for a reviewer to "
+        "approve the filing, which moves it to `cleared`. Each wait survives restarts."
+    )
+    with session_scope() as session:
+        runs = governance_service.list_runs(session, s.id)
+    open_run = next((r for r in runs if r.state.is_open), None)
+    if runs:
+        st.dataframe([_run_row(r) for r in runs], hide_index=True, width="stretch")
+    if open_run is None:
+        if s.status is ShipmentStatus.CANCELLED:
+            st.caption("Cancelled shipments are not cleared.")
+        elif st.button("Start clearance run", key=f"clearance_start_{cid}"):
+            _drive("Running the agents (~30 s or more)...",
+                   supervisor.start_clearance_run(s.id, started_by=actor))  # fmt: skip
+        return
+    if open_run.state is RunState.AWAITING_COMPLIANCE:
+        _render_compliance_wait(open_run)
+    elif open_run.state is RunState.AWAITING_FILING:
+        _render_filing_wait(open_run, reviewer)
+    else:
+        st.warning(f"Run {open_run.run_id[:8]} is still `running` — in progress elsewhere, or "
+                   "interrupted by a crash.")  # fmt: skip
+    _render_abandon(open_run, reviewer)
+
+
 def render_create_form(actor: str) -> None:
     with st.form("create_shipment", clear_on_submit=False):
         st.subheader("New shipment")
@@ -476,7 +600,7 @@ def render_create_form(actor: str) -> None:
 # --------------------------------------------------------------------------- page
 
 
-def render_shipments(actor: str) -> None:
+def render_shipments(actor: str, reviewer: str | None) -> None:
     status_filter = st.selectbox("Filter by status", STATUS_FILTERS, key="status_filter")
     status = None if status_filter == "all" else ShipmentStatus(status_filter)
     with session_scope() as session:
@@ -495,6 +619,7 @@ def render_shipments(actor: str) -> None:
     render_documents(shipment, actor)
     render_verification(shipment)
     render_risk(shipment)
+    render_clearance(shipment, actor, reviewer)
 
 
 st.title("Shipping Ops")
@@ -502,8 +627,14 @@ show_flash()
 operator = st.sidebar.text_input(
     "Operator (recorded in the audit trail)", "ops-dashboard", key="actor"
 )
+filing_reviewer: str | None = st.sidebar.selectbox(
+    "Reviewer (filing decisions)", REVIEWERS, index=None, key="reviewer",
+    placeholder="registered reviewers (REVIEWERS)",
+)  # fmt: skip
+if not REVIEWERS:
+    st.sidebar.warning("No reviewers configured — set REVIEWERS in .env.")
 tab_list, tab_new = st.tabs(["Shipments", "New shipment"])
 with tab_list:
-    render_shipments(operator.strip() or "ops-dashboard")
+    render_shipments(operator.strip() or "ops-dashboard", filing_reviewer)
 with tab_new:
     render_create_form(operator.strip() or "ops-dashboard")

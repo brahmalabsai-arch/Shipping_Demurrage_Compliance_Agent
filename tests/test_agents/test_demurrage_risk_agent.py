@@ -27,6 +27,7 @@ from models.schemas import PortRateUpsert
 from scripts import seed_fx_rates, seed_port_rates, seed_shipments
 from services import demurrage_service, fx_service, shipping_service
 from services.errors import ShipmentCancelledError
+from tests.fixtures.governance import clear
 from tests.fixtures.shipments import make_shipment
 
 S = ShipmentStatus
@@ -77,7 +78,10 @@ def create(
     with session_factory() as session, session.begin():
         record = shipping_service.create_shipment(session, make_shipment(**overrides), "test")
         for status in status_path:
-            shipping_service.update_status(session, record.id, status, "test")
+            if status is ShipmentStatus.CLEARED:  # only by filing with an approval (Phase 11)
+                clear(session, record.id)
+            else:
+                shipping_service.update_status(session, record.id, status, "test")
     return record.id
 
 

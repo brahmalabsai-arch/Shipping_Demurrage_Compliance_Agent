@@ -4,7 +4,10 @@ ask the Compliance agent (RAG over the approved rules in force, with citations).
 Reads and writes go through ``services.compliance_service`` — the same functions
 ``compliance_rulebook_mcp`` and the agents use. A proposal (from here or from the Regulatory
 Watch agent) is always ``pending``; only the Approve / Reject buttons, which call
-``compliance_service.decide`` with the reviewer named in the sidebar, change a rule's status.
+``compliance_service.decide`` with the reviewer chosen in the sidebar (a registered reviewer,
+``REVIEWERS``), change a rule's status. An approval in force can later be revoked (a separate,
+audited act — the version it replaced comes back in force). Clearance runs waiting on a decided
+rule are resumed from Shipping Ops.
 A proposal is always shown against the **rule in force** (``compliance_service.review_context``)
 with the history since it; a rejection must give a reason, stored with the decision.
 """
@@ -20,13 +23,14 @@ from agents.state import ComplianceFinding
 from dashboards.ui import fmt_ist, run_action, show_flash
 from models.enums import RuleDecision
 from models.schemas import ComplianceRuleRecord, ReviewContext, RuleProposal
-from services import bulletin_service
+from services import bulletin_service, governance_service
 from services import compliance_service as svc
 from services.db import session_scope
 
 st.set_page_config(page_title="Compliance", layout="wide")
 
 NEW_RULE = "(new rule)"
+REVIEWERS: list[str] = [r.name for r in governance_service.reviewers()]
 
 
 def _codes(rule: ComplianceRuleRecord) -> str:
@@ -69,7 +73,15 @@ def _render_against_in_force(rule: ComplianceRuleRecord, in_force: ComplianceRul
     st.code(diff or "(text unchanged)", language="diff")
 
 
-def _render_proposal(context: ReviewContext, reviewer: str) -> None:
+def _render_waiting_runs(rule: ComplianceRuleRecord) -> None:
+    with session_scope() as session:
+        runs = governance_service.runs_awaiting_rule(session, rule.id)
+    if runs:
+        st.info(f"{len(runs)} clearance run(s) are waiting on this decision — resume them on "
+                "Shipping Ops → Clearance run once it is decided.")  # fmt: skip
+
+
+def _render_proposal(context: ReviewContext, reviewer: str | None) -> None:
     rule, in_force = context.proposal, context.in_force
     with st.container(border=True):
         st.markdown(f"**{rule.rule_key} v{rule.version}** — proposed {fmt_ist(rule.created_at)}")
@@ -81,6 +93,7 @@ def _render_proposal(context: ReviewContext, reviewer: str) -> None:
         )
         if rule.change_summary:
             st.caption(f"Summary when proposed: {rule.change_summary}")
+        _render_waiting_runs(rule)
         for line in context.history:
             st.warning(line)
         if in_force is None:
@@ -92,24 +105,41 @@ def _render_proposal(context: ReviewContext, reviewer: str) -> None:
             "Reason (required to reject; optional to approve)", "", key=f"note_{rule.id}"
         )
         b1, b2, _ = st.columns([1, 1, 4])
-        if b1.button("Approve", key=f"approve_{rule.id}", type="primary"):
-            _decide(rule, RuleDecision.APPROVE, reviewer, note)
-        if b2.button("Reject", key=f"reject_{rule.id}"):
-            _decide(rule, RuleDecision.REJECT, reviewer, note)
+        undecidable = reviewer is None
+        if b1.button("Approve", key=f"approve_{rule.id}", type="primary", disabled=undecidable):
+            _decide(rule, RuleDecision.APPROVE, reviewer or "", note)
+        if b2.button("Reject", key=f"reject_{rule.id}", disabled=undecidable):
+            _decide(rule, RuleDecision.REJECT, reviewer or "", note)
 
 
-def render_pending(contexts: list[ReviewContext], reviewer: str) -> None:
+def render_pending(contexts: list[ReviewContext], reviewer: str | None) -> None:
     st.subheader("Pending review")
     if not contexts:
         st.info("Nothing awaiting review.")
         return
-    if not reviewer.strip():
-        st.warning("Enter your name as *Reviewer* in the sidebar before deciding.")
+    if reviewer is None:
+        st.warning("Choose yourself as *Reviewer* in the sidebar before deciding.")
     for context in contexts:
         _render_proposal(context, reviewer)
 
 
 # --------------------------------------------------------------------------- rulebook
+
+
+def render_revoke(approved: list[ComplianceRuleRecord], reviewer: str | None) -> None:
+    """Withdraw an approval in force (a new, audited act; the approval itself is kept)."""
+    with st.expander("Revoke an approval"):
+        st.caption("The version it replaced (if any) comes back in force; with none, the rule "
+                   "has no version in force until a new proposal is approved. Final.")  # fmt: skip
+        by_label = {f"{r.rule_key} v{r.version}": r for r in approved}
+        picked = st.selectbox("Rule in force", list(by_label), key="revoke_pick")
+        reason = st.text_input("Reason (required)", "", key="revoke_reason")
+        if st.button("Revoke approval", key="revoke_submit", disabled=reviewer is None):
+            rule = by_label[picked]
+            run_action(
+                lambda session: svc.revoke_decision(session, rule.id, reviewer or "", reason),
+                f"Revoked {picked} (by {reviewer}).",
+            )
 
 
 def render_rulebook(approved: list[ComplianceRuleRecord]) -> None:
@@ -152,6 +182,9 @@ def render_history(rules: list[ComplianceRuleRecord]) -> None:
                 "Decided by": r.decided_by or "",
                 "Decided at": fmt_ist(r.decided_at) if r.decided_at else "",
                 "Reason": r.decision_note or "",
+                "Revoked by": r.revoked_by or "",
+                "Revoked at": fmt_ist(r.revoked_at) if r.revoked_at else "",
+                "Revocation reason": r.revoke_note or "",
                 "Summary": r.change_summary or "",
             }
             for r in rules
@@ -257,9 +290,12 @@ def render_ask() -> None:
 
 st.title("Compliance Rulebook")
 show_flash()
-reviewer_name = st.sidebar.text_input(
-    "Reviewer (your name, recorded as decided_by)", "", key="reviewer"
-)
+reviewer_name: str | None = st.sidebar.selectbox(
+    "Reviewer (recorded as decided_by)", REVIEWERS, index=None, key="reviewer",
+    placeholder="registered reviewers (REVIEWERS)",
+)  # fmt: skip
+if not REVIEWERS:
+    st.sidebar.warning("No reviewers configured — set REVIEWERS in .env.")
 proposer = st.sidebar.text_input(
     "Proposer (recorded in the audit trail)", "compliance-dashboard", key="actor"
 )
@@ -279,6 +315,7 @@ with pending_tab:
     render_pending(review_contexts, reviewer_name)
 with rulebook_tab:
     render_rulebook(approved_rules)
+    render_revoke(approved_rules, reviewer_name)
 with history_tab:
     render_history(all_rules)
 with propose_tab:

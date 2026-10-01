@@ -86,3 +86,12 @@ def sync_index(rules_in_force: Sequence[ComplianceRuleRecord]) -> SyncReport:
         collection.delete(ids=stale)
     index_rules(rules_in_force)
     return SyncReport([f"{r.rule_key} v{r.version}" for r in rules_in_force], sorted(stale))
+
+
+def remove_rules(rule_keys: Sequence[str]) -> None:
+    """Drop the entries of rules that no longer have a version in force (a revocation with no
+    earlier version to reinstate)."""
+    if not rule_keys:
+        return
+    store.collection().delete(ids=list(rule_keys))
+    logger.info("rag.removed", rule_keys=list(rule_keys))

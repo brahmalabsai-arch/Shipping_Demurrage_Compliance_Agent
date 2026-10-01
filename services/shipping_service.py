@@ -5,6 +5,11 @@ The single code path to shipping data for both the Shipping Ops dashboard and
 flush — the caller's :func:`services.db.session_scope` commits the change together with its
 ``audit.events`` row. Nothing is ever deleted: cancellation is a status and document amendments
 chain through ``superseded_by`` (conventions §3).
+
+Reaching ``cleared`` is gated (Phase 11): ``update_status`` refuses it, and
+:func:`clear_shipment` — the only way there — needs a reviewer's approved filing decision
+(``governance_service.record_filing_decision``, taken at the supervisor's filing gate). A trigger
+on ``shipping.shipments`` enforces the same rule in Postgres.
 """
 
 from datetime import date, timedelta
@@ -15,8 +20,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from models.db_models import Document, Shipment
-from models.enums import ShipmentStatus
+from models.db_models import Document, FilingDecision, Shipment
+from models.enums import RuleDecision, ShipmentStatus
 from models.schemas import (
     DocumentAmend,
     DocumentCreate,
@@ -27,9 +32,12 @@ from models.schemas import (
 )
 from services import audit_service
 from services.errors import (
+    ClearanceRequiresApprovalError,
     DocumentNotFoundError,
     DocumentSupersededError,
     DuplicateContainerError,
+    FilingDecisionNotFoundError,
+    InvalidFilingDecisionError,
     InvalidShipmentDataError,
     InvalidStatusTransitionError,
     ShipmentCancelledError,
@@ -39,8 +47,8 @@ from services.errors import (
 S = ShipmentStatus
 
 # Allowed lifecycle moves. `held` is a customs hold that returns to review once resolved;
-# cancellation is only possible before the cargo reaches port. Reaching `cleared` will be
-# additionally gated on an explicit human approval by the Phase 11 supervisor.
+# cancellation is only possible before the cargo reaches port. `under_review -> cleared` is
+# additionally gated on a human's approved filing decision: only `clear_shipment` makes it.
 TRANSITIONS: dict[ShipmentStatus, frozenset[ShipmentStatus]] = {
     S.QUOTED: frozenset({S.BOOKED, S.CANCELLED}),
     S.BOOKED: frozenset({S.IN_TRANSIT, S.CANCELLED}),
@@ -163,8 +171,14 @@ def update_status(
     """Move a shipment one step along its lifecycle, enforcing :data:`TRANSITIONS`.
 
     Raises ``InvalidStatusTransitionError`` for any move not in the table, including a no-op
-    move to the current status.
+    move to the current status, and ``ClearanceRequiresApprovalError`` for ``cleared`` — that
+    move is :func:`clear_shipment`'s alone.
     """
+    if status is ShipmentStatus.CLEARED:
+        raise ClearanceRequiresApprovalError(
+            "a shipment is cleared only by filing it with a reviewer's approval "
+            "(a supervised clearance run's filing gate)"
+        )
     row = _load_shipment(session, shipment_id)
     current = row.status
     if status not in TRANSITIONS[current]:
@@ -182,6 +196,55 @@ def update_status(
         entity_type="shipment",
         entity_id=row.id,
         payload={"from": current, "to": status},
+    )
+    session.flush()
+    return ShipmentRecord.model_validate(row)
+
+
+def clear_shipment(
+    session: Session, shipment_id: UUID, filing_decision_id: UUID, actor: str
+) -> ShipmentRecord:
+    """File the shipment: ``under_review -> cleared``, citing the reviewer's approved filing
+    decision — the only way a shipment is ever cleared.
+
+    Raises ``FilingDecisionNotFoundError`` for an unknown decision, ``InvalidFilingDecisionError``
+    if it is a rejection or belongs to another shipment, ``ShipmentCancelledError`` and
+    ``InvalidStatusTransitionError`` (the shipment must be ``under_review``).
+    """
+    decision = session.get(FilingDecision, filing_decision_id)
+    if decision is None:
+        raise FilingDecisionNotFoundError(f"no filing decision with id {filing_decision_id}")
+    if decision.shipment_id != shipment_id:
+        raise InvalidFilingDecisionError(
+            f"filing decision {filing_decision_id} is for another shipment"
+        )
+    if decision.decision is not RuleDecision.APPROVE:
+        raise InvalidFilingDecisionError(
+            f"filing decision {filing_decision_id} is a rejection by {decision.reviewer}"
+        )
+    row = _load_shipment(session, shipment_id)
+    _ensure_not_cancelled(row)
+    current = row.status
+    if current is not ShipmentStatus.UNDER_REVIEW:
+        raise InvalidStatusTransitionError(
+            f"{row.container_id}: cannot move {current} -> cleared; it must be under_review"
+        )
+
+    row.status = ShipmentStatus.CLEARED
+    session.flush()
+    audit_service.record(
+        session,
+        actor=actor,
+        action="shipment.status_changed",
+        entity_type="shipment",
+        entity_id=row.id,
+        payload={
+            "from": current,
+            "to": ShipmentStatus.CLEARED,
+            "filing_decision_id": decision.id,
+            "run_id": decision.run_id,
+            "approved_by": decision.reviewer,
+        },
     )
     session.flush()
     return ShipmentRecord.model_validate(row)

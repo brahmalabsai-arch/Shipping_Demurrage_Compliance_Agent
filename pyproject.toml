@@ -33,6 +33,9 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
     # Compliance RAG (Phase 9): the BM25 half of the hybrid retriever (pure Python).
     "rank-bm25>=0.2.2",
+    # Supervisor (Phase 11): LangGraph checkpoints in Postgres (sync saver — see
+    # agents/checkpoint.py for why not the async one on Windows).
+    "langgraph-checkpoint-postgres>=3.0",
 ]
 
 [project.optional-dependencies]

@@ -151,3 +151,57 @@ class McpToolError(CustomsCopilotError):
         self.tool = tool
         self.error_type = error_type
         self.message = message
+
+
+# --------------------------------------------------------------------------- governance (Phase 11)
+
+
+class RuleNotInForceError(CustomsCopilotError):
+    """Only the approved version in force of a rule can be revoked."""
+
+
+class UnknownReviewerError(CustomsCopilotError):
+    """The named reviewer is not in the configured reviewer registry (``REVIEWERS``)."""
+
+
+class ClearanceRequiresApprovalError(CustomsCopilotError):
+    """A shipment reaches ``cleared`` only through an approved filing decision
+    (``shipping_service.clear_shipment``), never through a plain status change."""
+
+
+class IncompleteCaseError(CustomsCopilotError):
+    """The clearance checklist is not ready (blockers, data gaps, missing inputs or conflicts),
+    so the shipment cannot be filed."""
+
+
+class CaseRunNotFoundError(CustomsCopilotError):
+    """No supervised clearance run exists with the given run_id."""
+
+
+class RunAlreadyOpenError(CustomsCopilotError):
+    """The shipment already has an open clearance run; finish or abandon it first."""
+
+
+class RunAlreadyFinishedError(CustomsCopilotError):
+    """The clearance run has reached a terminal state; a new run is needed to try again."""
+
+
+class RunNotAtGateError(CustomsCopilotError):
+    """The run is not waiting at the gate this action is for (or not on that rule)."""
+
+
+class DecisionPendingError(CustomsCopilotError):
+    """The compliance rule the run waits on has not been decided yet."""
+
+
+class FilingDecisionNotFoundError(CustomsCopilotError):
+    """No filing decision exists with the given id."""
+
+
+class FilingAlreadyDecidedError(CustomsCopilotError):
+    """The run's filing gate already has its (final) decision."""
+
+
+class InvalidFilingDecisionError(CustomsCopilotError):
+    """A filing decision must name a reviewer; a rejection must give a reason; an approval must
+    be an approval of this shipment's run."""

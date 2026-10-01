@@ -3,23 +3,24 @@
 ``WatchState`` is the state of the regulatory watch pipeline (architecture §6: triggered by the
 scheduler, not by a shipment). ``CaseState`` is the shipment pipeline's state; each agent of that
 pipeline adds its own slice as it is built (Phase 7: document verification; Phase 8: demurrage
-and risk).
+and risk; ...; Phase 11: the supervisor's human gates).
 """
 
 import operator
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from models.enums import ContainerType
+from models.enums import ContainerType, RuleStatus
 from models.schemas import (
     ChangeLogEntryRecord,
     ComplianceRuleRecord,
     DocumentRecord,
     EmailReceipt,
+    FilingDecisionRecord,
     ResolvedRate,
     ShipmentRecord,
 )
@@ -217,6 +218,27 @@ class Checklist(BaseModel):
     summary: str
 
 
+class GateDecision(BaseModel):
+    """How the compliance gate's wait on one pending rule version ended — read from the rulebook
+    after a human decided it on the Compliance page (the resume carries no decision itself)."""
+
+    rule_id: UUID
+    rule_key: str
+    version: int
+    outcome: RuleStatus  # approved, rejected (final — never re-queued) or, later, revoked
+    reviewer: str | None
+    note: str | None
+    decided_at: datetime | None
+
+
+RunOutcome = Literal[
+    "filed",  # a reviewer approved the filing and the shipment is `cleared`
+    "filing_rejected",  # a reviewer refused the filing — final for this run
+    "blocked",  # the checklist is not ready for clearance (or the documents changed since)
+    "not_fileable",  # the shipment is not at a stage that can be filed (not docked/under review)
+]
+
+
 class CaseState(BaseModel):
     """What the shipment pipeline knows about one shipment (architecture §6).
 
@@ -228,7 +250,10 @@ class CaseState(BaseModel):
     ``data_gaps``. Compliance RAG (Phase 9) reads ``shipment`` and ``document_discrepancies``
     (from verification) and writes ``compliance_findings``. The clearance checklist (Phase 10)
     reads all of the above plus ``agent_failures`` (written by the graph when an upstream agent
-    raises or times out) and writes ``checklist``.
+    raises or times out) and writes ``checklist``. The supervisor (Phase 11) writes
+    ``pending_rules`` (the compliance gate's current wait), ``compliance_decisions``,
+    ``filing_decision`` and, when the run ends, ``outcome`` / ``outcome_detail``; after an
+    approved rule change it re-runs the compliance agent and the checklist.
     """
 
     run_id: str
@@ -248,3 +273,9 @@ class CaseState(BaseModel):
     # Written by the graph's guard around each upstream agent; parallel branches append.
     agent_failures: Annotated[list[AgentFailure], operator.add] = Field(default_factory=list)
     checklist: Checklist | None = None
+    # Supervisor (Phase 11).
+    pending_rules: list[ComplianceRuleRecord] = Field(default_factory=list)  # the current wait
+    compliance_decisions: Annotated[list[GateDecision], operator.add] = Field(default_factory=list)
+    filing_decision: FilingDecisionRecord | None = None
+    outcome: RunOutcome | None = None
+    outcome_detail: str | None = None

@@ -13,12 +13,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 from streamlit.testing.v1 import AppTest
 
-from agents import document_verification_agent, graph
+from agents import document_verification_agent, graph, supervisor
 from agents.mcp_clients import memory_connector
 from config.settings import PROJECT_ROOT
 from models.db_models import AuditEvent
-from models.enums import ContainerType, DocType, ShipmentStatus
+from models.enums import ContainerType, DocType, RunState, ShipmentStatus
 from scripts import seed_compliance, seed_fx_rates, seed_port_rates, seed_shipments
+from services import governance_service
 from services import shipping_service as svc
 from tests.fixtures.shipments import make_shipment
 
@@ -237,3 +238,55 @@ def test_analysis_checklist_lists_the_blocking_discrepancy_with_guidance(
     assert (first["Severity"], first["Item"]) == ("blocker", "quantity mismatch")
     assert first["Raised by"] == "document_verification_agent"
     assert "DOC-quantity-consistency v1" in first["References"]
+
+
+# --------------------------------------------------------------------------- Phase 11
+
+
+def test_cleared_is_never_a_manual_move(session_factory: sessionmaker[Session]) -> None:
+    with session_factory() as session, session.begin():
+        created = svc.create_shipment(session, make_shipment(container_id=CID), "fixture")
+        for status in (ShipmentStatus.BOOKED, ShipmentStatus.IN_TRANSIT, ShipmentStatus.DOCKED,
+                       ShipmentStatus.UNDER_REVIEW):  # fmt: skip
+            svc.update_status(session, created.id, status, "fixture")
+    at = _open_page()
+    at.selectbox(key="selected_container").set_value(CID).run()
+
+    assert at.selectbox(key=f"next_status_{CID}").options == ["held"]
+    assert any("reached only by filing" in c.value for c in at.caption)
+
+
+def test_clearance_run_from_start_to_filed(
+    session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch, checkpoints: None
+) -> None:
+    monkeypatch.setattr(supervisor, "stdio_connector", memory_connector)
+    monkeypatch.setattr(supervisor, "today_ist", lambda: date(2026, 9, 28))
+    seed_shipments.seed()
+    seed_port_rates.seed()
+    seed_fx_rates.seed()
+    seed_compliance.seed()
+    at = _open_page()
+    at.selectbox(key="selected_container").set_value("MSKU7001001").run()
+
+    at.button(key="clearance_start_MSKU7001001").click()
+    at.run()
+    assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    assert any("filing gate" in s.value for s in at.success)
+    # no reviewer chosen yet: nobody can decide
+    assert any(w.value.startswith("Choose yourself") for w in at.warning)
+    assert not [b for b in at.button if b.key and b.key.startswith("approve_filing_")]
+
+    at.selectbox(key="reviewer").set_value("Asha Rao").run()
+    approve = next(b for b in at.button if b.key and b.key.startswith("approve_filing_"))
+    approve.click()
+    at.run()
+
+    assert not at.exception, at.exception
+    assert not at.error, [e.value for e in at.error]
+    assert "filed" in at.success[0].value
+    with session_factory() as session:
+        shipment = svc.get_shipment_by_container_id(session, "MSKU7001001")
+        assert shipment.status is ShipmentStatus.CLEARED
+        [run] = governance_service.list_runs(session, shipment.id)
+        assert run.state is RunState.FILED

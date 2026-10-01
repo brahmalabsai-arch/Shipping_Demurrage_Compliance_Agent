@@ -35,6 +35,7 @@ SERVERS = (
     "notifications_mcp",
 )
 # conventions §2 verbs, plus the two the architecture contract itself names (search_, diff_)
+# and the two governed acts of Phase 11 (revoke_decision, clear_shipment)
 VERBS = {
     "get",
     "list",
@@ -46,6 +47,8 @@ VERBS = {
     "resolve",
     "search",
     "diff",
+    "revoke",
+    "clear",
 }
 
 

@@ -1,5 +1,6 @@
 """Phase 4 — Compliance dashboard: proposals land as pending, and only an Approve/Reject click
-with a named reviewer (``compliance_service.decide``) changes a rule's status."""
+by a registered reviewer (``compliance_service.decide``; Phase 11 registry) changes a rule's
+status; an approval in force can be revoked (Phase 11)."""
 
 from datetime import date
 
@@ -10,20 +11,25 @@ from streamlit.testing.v1 import AppTest
 from agents import compliance_rag_agent
 from agents.mcp_clients import memory_connector
 from config.settings import PROJECT_ROOT
-from models.enums import RuleStatus
+from models.enums import RuleStatus, RunState
 from models.schemas import ComplianceRuleRecord, RuleProposal
 from scripts import seed_compliance
 from services import compliance_service as svc
+from services import governance_service, shipping_service
+from tests.fixtures.shipments import make_shipment
 
 PAGE = str(PROJECT_ROOT / "dashboards" / "pages" / "4_Compliance.py")
 KEY = "HSN-8708-duty"
+
+
+REVIEWER = "Asha Rao"  # registered in tests/conftest.py
 
 
 def _open_page(reviewer: str = "") -> AppTest:
     at = AppTest.from_file(PAGE, default_timeout=60).run()
     assert not at.exception, at.exception
     if reviewer:
-        at.text_input(key="reviewer").set_value(reviewer)
+        at.selectbox(key="reviewer").set_value(reviewer)
         at.run()
     return at
 
@@ -49,7 +55,7 @@ def test_approve_click_with_reviewer_puts_the_new_version_in_force(
     session_factory: sessionmaker[Session],
 ) -> None:
     proposal = _pending_v2(session_factory)
-    at = _open_page(reviewer="a.sharma")
+    at = _open_page(reviewer=REVIEWER)
     assert any("BCD raised to 20%" in c.value for c in at.caption)
     assert any("+20% of the assessable" in c.value for c in at.code)  # diff vs v1 shown
 
@@ -61,29 +67,27 @@ def test_approve_click_with_reviewer_puts_the_new_version_in_force(
     assert at.success[0].value.startswith(f"Approved {KEY} v2")
     with session_factory() as session:
         current = svc.get_current_rule(session, KEY)
-        assert (current.id, current.decided_by) == (proposal.id, "a.sharma")
+        assert (current.id, current.decided_by) == (proposal.id, REVIEWER)
         v1 = svc.list_rules(session, rule_key=KEY)[0]
         assert v1.superseded_by == proposal.id
 
 
-def test_decision_without_a_reviewer_name_is_refused(
+def test_only_registered_reviewers_can_decide(
     session_factory: sessionmaker[Session],
 ) -> None:
     proposal = _pending_v2(session_factory)
-    at = _open_page()  # reviewer left blank
-    assert at.warning[0].value.startswith("Enter your name")
-
-    at.button(key=f"approve_{proposal.id}").click()
-    at.run()
-
-    assert at.error[0].value.startswith("InvalidDecisionError")
+    at = _open_page()  # no reviewer chosen
+    assert at.warning[0].value.startswith("Choose yourself")
+    assert at.selectbox(key="reviewer").options == ["Asha Rao", "Vikram Shah"]  # no free text
+    assert at.button(key=f"approve_{proposal.id}").disabled
+    assert at.button(key=f"reject_{proposal.id}").disabled
     with session_factory() as session:
         assert svc.get_rule(session, proposal.id).status is RuleStatus.PENDING
 
 
 def test_reject_click_is_final(session_factory: sessionmaker[Session]) -> None:
     proposal = _pending_v2(session_factory)
-    at = _open_page(reviewer="a.sharma")
+    at = _open_page(reviewer=REVIEWER)
 
     at.text_input(key=f"note_{proposal.id}").set_value("awaiting the official notification")
     at.button(key=f"reject_{proposal.id}").click()
@@ -149,7 +153,7 @@ def test_rulebook_filters_by_hs_code(session_factory: sessionmaker[Session]) -> 
 
 def test_reject_without_a_reason_is_refused(session_factory: sessionmaker[Session]) -> None:
     proposal = _pending_v2(session_factory)
-    at = _open_page(reviewer="a.sharma")
+    at = _open_page(reviewer=REVIEWER)
 
     at.button(key=f"reject_{proposal.id}").click()
     at.run()
@@ -175,7 +179,7 @@ def test_card_compares_with_the_rule_in_force_and_shows_history(
             "regulatory_watch_agent",
         )  # fmt: skip
 
-    at = _open_page(reviewer="a.sharma")
+    at = _open_page(reviewer=REVIEWER)
 
     assert v3.version == 3
     assert any("v2 (proposed " in w.value and "awaiting official notification" in w.value
@@ -224,3 +228,52 @@ def test_ask_the_rulebook_says_not_found(
 
     assert not at.exception, at.exception
     assert any(i.value == "Not found in current rulebook." for i in at.info)
+
+
+# --------------------------------------------------------------------------- Phase 11
+
+
+def test_revoke_puts_the_previous_version_back_in_force(
+    session_factory: sessionmaker[Session],
+) -> None:
+    proposal = _pending_v2(session_factory)
+    with session_factory() as session, session.begin():
+        svc.decide(session, proposal.id, "approve", REVIEWER)
+    at = _open_page(reviewer="Vikram Shah")
+
+    at.selectbox(key="revoke_pick").set_value(f"{KEY} v2")
+    at.button(key="revoke_submit").click()
+    at.run()
+    assert at.error[0].value.startswith("InvalidDecisionError: a revocation must give a reason")
+
+    at.text_input(key="revoke_reason").set_value("notification withdrawn")
+    at.button(key="revoke_submit").click()
+    at.run()
+
+    assert not at.error, [e.value for e in at.error]
+    assert at.success[0].value == f"Revoked {KEY} v2 (by Vikram Shah)."
+    with session_factory() as session:
+        revoked = svc.get_rule(session, proposal.id)
+        assert (revoked.status, revoked.decided_by, revoked.revoked_by) == (
+            RuleStatus.REVOKED, REVIEWER, "Vikram Shah"
+        )  # fmt: skip
+        assert svc.get_current_rule(session, KEY).version == 1
+    history = at.dataframe[1].value
+    assert "notification withdrawn" in set(history["Revocation reason"])
+
+
+def test_a_pending_card_says_which_clearance_runs_wait_on_it(
+    session_factory: sessionmaker[Session],
+) -> None:
+    proposal = _pending_v2(session_factory)
+    with session_factory() as session, session.begin():
+        sid = shipping_service.create_shipment(session, make_shipment(), "test").id
+        governance_service.start_run(session, "11111111-1111-1111-1111-111111111111", sid,
+                                     date(2026, 9, 28), "test")  # fmt: skip
+        governance_service.update_run(session, "11111111-1111-1111-1111-111111111111",
+                                      RunState.AWAITING_COMPLIANCE, actor="supervisor",
+                                      awaiting_rule_ids=[proposal.id])  # fmt: skip
+
+    at = _open_page(reviewer=REVIEWER)
+
+    assert any(i.value.startswith("1 clearance run(s) are waiting") for i in at.info)

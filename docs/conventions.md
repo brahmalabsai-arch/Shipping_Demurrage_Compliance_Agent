@@ -9,7 +9,7 @@
 
 ## 2. Naming
 - Modules/files/functions: `snake_case`. Classes: `PascalCase`. Pydantic models describing a domain object: `<Noun>Record` (e.g. `ShipmentRecord`) to distinguish from the SQLAlchemy `<Noun>` ORM class.
-- MCP tool names are verb-first and consistent across all six servers: `get_`, `list_`, `create_`, `update_`, `propose_`, `decide_`, `send_`, `resolve_`. No server invents a synonym for an action another server already named (e.g., never `fetch_` in one server and `get_` in another for the same kind of operation).
+- MCP tool names are verb-first and consistent across all six servers: `get_`, `list_`, `create_`, `update_`, `propose_`, `decide_`, `send_`, `resolve_` (plus `search_`, `diff_`, and the two governed acts of Phase 11, `revoke_` and `clear_`). No server invents a synonym for an action another server already named (e.g., never `fetch_` in one server and `get_` in another for the same kind of operation).
 - Custom exceptions live in `services/errors.py`, one per failure mode, named `<Reason>Error` (e.g. `RateNotFoundError`, `PortRateNotFoundError`, `EmailDeliveryError`) — never a bare `Exception` or `ValueError` for a domain-level failure, so tests can assert on type.
 - Alembic migration files are prefixed with a zero-padded sequence matching the phase that introduced them (`0001_shipping`, `0002_demurrage`, …), so the migration history itself documents the phased build.
 
@@ -24,11 +24,15 @@
 - Every agent module exports exactly one LangGraph node function with a documented input/output slice of `CaseState` — no agent reads or writes state fields outside its declared slice.
 - An agent only imports the MCP client wrapper for the servers its role legitimately needs (enforced by import-linter rule or simple code review — e.g. `compliance_rag_agent.py` must never import `shipping_records_mcp`).
 - Every MCP tool call is wrapped to log: tool name, arguments (redact none — this is synthetic data), result or exception, timing. Logged via `structlog`, correlated by a `run_id` threaded through `CaseState`.
-- `compliance_rulebook_mcp.decide()` is the only function anywhere in the codebase permitted to set `status='approved'`. This is enforced by a unit test that greps/AST-scans the codebase for any other `status =` assignment against `ComplianceRule`, or at minimum a code-review checklist item.
+- `compliance_rulebook_mcp.decide()` is the only function anywhere in the codebase permitted to set `status='approved'`. This is enforced by a unit test that greps/AST-scans the codebase for any other `status =` assignment against `ComplianceRule`, or at minimum a code-review checklist item. (Phase 11: `revoke_decision` may additionally move the version in force `approved -> revoked`, never anything else — same scan, plus the trigger.)
+- Likewise `shipping_service.clear_shipment` (with an approved filing decision) is the only path to `cleared`; `update_status` refuses it and a trigger enforces it.
 
 ## 5. Human-in-the-loop conventions
 - Every `interrupt()` call in `supervisor.py` is paired with a specific, named resumption function (`resume_after_compliance_decision`, `resume_after_filing_approval`) — never a generic "continue" — so it's always clear from the code what unblocks a given interrupt.
 - A rejection is a distinct terminal state (`status='rejected'`), not a re-queue and not a deletion.
+- A resume value never carries decision authority: the compliance gate re-reads the rule from the rulebook; the filing gate accepts only the id of a recorded `governance.filing_decisions` row of the same run. Anything else is refused and the gate waits again.
+- Each gate node calls `interrupt()` once per execution (a refused answer routes back to the gate) — never several `interrupt()` calls in a loop inside one node.
+- Human decisions are taken by registered reviewers (`REVIEWERS` setting): the dashboards offer a select, not free text, and the supervisor's resume functions raise `UnknownReviewerError` otherwise.
 
 ## 6. Secrets & environment
 - `.env` (real values) is git-ignored; `.env.example` (keys only, no values) is committed.
