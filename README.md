@@ -1,20 +1,110 @@
 # Port & Customs Clearance Copilot
 
-A locally run multi-agent system (LangGraph + MCP) for an import desk at Nhava Sheva (JNPT,
-`INNSA`). It cross-checks a shipment's documents against three editable data sources — port
-demurrage tariffs, FX-rate rules and a compliance rulebook — and produces discrepancy flags, a
-demurrage/hold-risk estimate, a clearance checklist and a human-gated clearance workflow. A
-scheduled agent watches a (simulated) customs bulletin and emails a reviewer. Every agent action
-and human decision lands in an audit trail; Mission Control shows it all, plus the before/after
-ROI of the agents.
-
-- Specs: [`docs/`](docs/) — start with [`problem_statement.md`](docs/problem_statement.md) and
-  [`architecture.md`](docs/architecture.md).
-- Demo walk-through: [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
-- Learn every path to clearance with fifteen hands-on cases: [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md).
+**AI agents for an import desk that catch paperwork problems before a container docks, so
+customs does not hold the box and the port does not charge for the wait. People still make
+every decision that matters.**
 
 ![A shipment taken from analysis to Cleared: the agents check it, a clearance run stops for a
 reviewer, the filing is approved](docs/media/02-straight-path.gif)
+
+## The problem
+
+Picture the import desk of an auto-parts company bringing containers into Nhava Sheva (JNPT),
+near Mumbai. Every container that lands starts a clock. The port gives a few free days, then
+charges **demurrage** for every extra day the box sits there: in this project's demo tariff a
+40ft box gets 5 free days, then USD 90 a day.
+
+Whether the box leaves on time mostly depends on paperwork. Customs assesses the import only
+when the papers tell one consistent story:
+
+- the **commercial invoice**, the **packing list** and the **bill of lading** must agree with
+  each other and with the booking: quantities, values, currency;
+- every one of them must be on file once the goods are on board;
+- the value has to be converted into rupees at the **right exchange rate**, and the rule
+  changes with the stage: a quote uses the day's spot rate, the bill of lading and the invoice
+  lock the rate on their own dates, port charges use the rate customs notifies for the period;
+- the goods must meet the **customs rules in force**, and those change: the authority
+  publishes revised duty rates and requirements in its bulletin.
+
+When something does not match (a packing list that counts 760 gearboxes against an invoice that
+says 800, a missing invoice, a currency typed wrong), customs **holds the box** until it is
+explained, which takes days (this project's model assumes 5 for a quantity mismatch and 7 for a
+missing invoice), and demurrage keeps running the whole time.
+
+Without help, a desk checks all of this by hand, across emails, spreadsheets and portals, often
+after the box has docked, which is exactly when every day of delay starts to cost money. Rule changes
+are noticed late or not at all. And when someone asks *why* a shipment was filed, or held, the
+answer is scattered across inboxes.
+
+## How the copilot helps
+
+The copilot checks every shipment as soon as its papers exist, before the box docks, and keeps
+a person in charge of every decision:
+
+1. **Checks the papers.** It compares the invoice, packing list and bill of lading with each
+   other and with the booking, lists every value it found and where it found it, and flags what
+   disagrees. It never picks a winner between two documents: that is a human call.
+2. **Prices the time in port.** It applies the port tariff in force on the arrival day and the
+   customs exchange rate, so the risk is a number in rupees, not a feeling.
+3. **Asks the rulebook.** It answers duty and document questions from the approved customs
+   rules only, and cites the rule it used.
+4. **Writes one checklist.** Everything above becomes a single list sorted into *Must fix*
+   (customs will not assess past it), *To do* and *Note*.
+5. **Watches for rule changes.** On a schedule (every 15 minutes by default) it reads the
+   customs bulletin. When a rule changes it emails the reviewer and proposes the change. It
+   never applies a rule on its own.
+6. **Waits for people at two gates.** A named reviewer approves rule changes, and a named
+   reviewer approves every filing. A shipment is never cleared without that approval.
+7. **Records everything.** Every agent step and every human decision lands in an audit trail:
+   who decided what, when, and on which version of the papers.
+
+## What it is worth
+
+The copilot pays for itself in **demurrage that is never charged**. If a paperwork problem is
+caught before the box docks, it is fixed while the ship is still at sea, and the box clears in
+its normal time instead of sitting in a customs hold.
+
+The Savings view in Mission Control computes this from the system's own data, not from a
+hard-coded estimate. In the demo case study (four containers, analysed on 28 Sep 2026), two
+shipments have paper problems:
+
+| Container | Problem | Without the copilot | With it | Demurrage avoided |
+|---|---|---|---|---|
+| MSCU7002002 | packing list counts 760, the invoice 800 | 8 days in port (3 + a 5-day hold), 3 charged | 3 days, none charged | INR 23,868 |
+| CMAU7003003 | commercial invoice missing | 10 days in port (3 + a 7-day hold), 6 charged | 3 days, none charged | INR 58,344 |
+| two others | papers in order | same either way | | INR 0 |
+| **Total** | | | | **INR 82,212** |
+
+Every figure can be rebuilt by hand from the dashboards: for MSCU7002002, 3 chargeable days ×
+USD 90 (the Demurrage page) × 88.40 (the customs rate on the FX Rates page) = INR 23,868. The
+assumptions behind it (a box with clean papers clears in 3 days; customs holds a box 5 days for
+a quantity mismatch and 7 for a missing document) are shown next to the result and can be
+changed.
+
+**At the scale of a desk** (an illustration, not a measurement): with the demo tariffs, one
+avoided hold on a 40ft box is worth INR 24,000 to 58,000, the two cases above. A desk clearing
+50 containers a month where 1 in 10 has a paper problem would avoid about **INR 1.2 to 2.9 lakh
+of demurrage a month**. Put your own volumes, tariffs and hold times in and the Savings view does
+the same arithmetic on them.
+
+The money is the easy part to count. The rest matters as much:
+
+- **Time:** a full check of one shipment (papers, rates, rules, checklist) takes about a minute
+  instead of an operator's cross-checking across documents and portals.
+- **No missed rule changes:** the bulletin is read on a schedule, and a change reaches the
+  reviewer by email within minutes, already summarised and staged for a decision.
+- **Decisions you can defend:** every filing names its approver and the exact papers it was
+  approved on. If the papers change after an approval, nothing is filed.
+- **No accidental filing:** a shipment with a must-fix problem, missing data or an undecided rule
+  change cannot reach *Cleared*.
+
+## What this is, and is not
+
+A working demo for one import desk, run locally on synthetic data: the shipments, tariffs,
+exchange rates, customs bulletin and rulebook are illustrative, not official. It is not
+connected to the customs system (ICEGATE) or a port system, and "cleared" here is an internal
+decision record, not a real customs filing. The agents' explanations use a language model
+(Groq) when a key is configured; every check, price and decision works without it.
 
 ## See it work
 
@@ -83,6 +173,23 @@ supervisor, and the counts on Overview.</summary>
 shipments](docs/media/08-audit-trail.gif)
 
 </details>
+
+## How it is built
+
+A locally run multi-agent system (LangGraph + MCP). Five agents (document verification,
+demurrage & risk, compliance RAG over the approved rulebook, the clearance checklist, and a
+scheduled regulatory watch) work through six MCP servers over one shared service layer, so the
+dashboards, the agents and the command line can never disagree about the data. A LangGraph
+supervisor runs the pipeline behind the two human gates and checkpoints every run in
+PostgreSQL, so a run can wait for a reviewer across days and restarts. Data lives in a native
+PostgreSQL; the rulebook search (BM25 + BGE embeddings + reranking) runs in an embedded
+ChromaDB; the dashboards are Streamlit; real review emails go through Gmail (OAuth).
+
+- Specs: [`docs/`](docs/), starting with [`problem_statement.md`](docs/problem_statement.md)
+  and [`architecture.md`](docs/architecture.md).
+- The JNPT case study, click by click: [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
+- Every path to clearance, as fifteen hands-on cases: [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md).
+- The dashboards' design system: [`DESIGN.md`](DESIGN.md).
 
 ## What you need
 
