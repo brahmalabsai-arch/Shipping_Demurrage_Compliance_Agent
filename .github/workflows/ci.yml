@@ -8,6 +8,9 @@ jobs:
   checks:
     name: lint, types, unit tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    env:
+      # No database in this job, but Settings needs a password to load; nothing connects.
+      POSTGRES_PASSWORD: unit-tests-have-no-database
     strategy:
       fail-fast: false
       matrix:

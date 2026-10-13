@@ -36,6 +36,9 @@ from tests.fixtures.rag import FakeEmbedder, FakeReranker
 DB_FIXTURES = {"db_engine", "db_connection", "session_factory", "db_session", "checkpoints"}
 # The registered reviewers every test sees (``REVIEWERS``); tests decide as these people.
 TEST_REVIEWERS = "Asha Rao <asha.rao@example.com>; Vikram Shah <vikram.shah@example.com>"
+TEST_REVIEWER_EMAIL = (
+    "reviewer@example.com"  # where tests' review emails go (an outbox, never sent)
+)
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -65,6 +68,8 @@ def _no_external_services(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     monkeypatch.setattr(settings, "email_backend", "outbox")
     monkeypatch.setattr(settings, "outbox_path", tmp_path / "outbox")
     monkeypatch.setattr(settings, "reviewers", TEST_REVIEWERS)
+    # A fixed address, so the review-email paths never depend on a local .env (CI has none).
+    monkeypatch.setattr(settings, "reviewer_email", TEST_REVIEWER_EMAIL)
 
 
 @pytest.fixture(autouse=True)

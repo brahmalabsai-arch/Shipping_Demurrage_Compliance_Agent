@@ -5,10 +5,23 @@ JSON lines to **stderr** — for stdio MCP servers stdout carries the protocol a
 
 import logging
 import sys
+from typing import TextIO, cast
 
 import structlog
 
 from config.settings import get_settings
+
+
+class _CurrentStderr:
+    """Writes to whatever ``sys.stderr`` is *now*, not the stream at configure time: the logger is
+    cached on first use, and a stream that is later swapped and closed (a test harness capturing
+    output does exactly that) would make every later log line raise ``ValueError``."""
+
+    def write(self, text: str) -> int:
+        return sys.stderr.write(text)
+
+    def flush(self) -> None:
+        sys.stderr.flush()
 
 
 def configure_logging() -> None:
@@ -23,6 +36,6 @@ def configure_logging() -> None:
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=cast(TextIO, _CurrentStderr())),
         cache_logger_on_first_use=True,
     )
