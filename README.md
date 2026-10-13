@@ -2,7 +2,7 @@
 
 **AI agents for an import desk that catch paperwork problems before a container docks, so
 customs does not hold the box and the port does not charge for the wait. People still make
-every decision that matters.**
+every decision that matters (HITL).**
 
 ![A shipment taken from analysis to Cleared: the agents check it, a clearance run stops for a
 reviewer, the filing is approved](docs/media/02-straight-path.gif)
