@@ -23,6 +23,7 @@ jobs:
       - run: ruff check .
       - run: black --check .
       - run: mypy .
+      - run: python -m scripts.scan_secrets  # nothing secret tracked (Phase 13)
       # `models` tests load the real embedding/reranker weights (the optional `models` extra,
       # not installed here); everything else uses deterministic fakes.
       - run: pytest -m "not db and not models"

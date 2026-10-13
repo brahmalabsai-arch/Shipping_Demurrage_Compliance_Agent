@@ -83,8 +83,11 @@ capstone-customs-copilot/
 ├── integrations/
 │   └── gmail_client.py               # OAuth flow + send()
 ├── dashboards/
-│   ├── Home.py
-│   └── pages/
+│   ├── Home.py                       # router: top navigation over views/
+│   ├── theme.py, ui.py               # design system and plain-language helpers
+│   ├── static/fonts/                 # bundled Outfit + Young Serif
+│   └── views/
+│       ├── 0_Overview.py
 │       ├── 1_Shipping_Ops.py
 │       ├── 2_Demurrage.py
 │       ├── 3_FX_Rates.py
@@ -562,7 +565,7 @@ Every branch raises a typed exception (`RateNotFoundError`) rather than defaulti
 
 Streamlit multipage app (`streamlit run dashboards/Home.py`). Each page imports the matching service module directly (in-process, same source of truth as §4) — no separate REST hop needed for the dashboards themselves. Mission Control (page 6) additionally triggers the LangGraph graph directly (via `agents/graph.py`) and renders `audit.events` as a live-updating table (Streamlit `st.rerun` on a short poll interval) plus the before/after ROI comparison (two runs of the same fixture set with the compliance/FX/demurrage data frozen at two different edited states).
 
-*As built (Phase 12):* `dashboards/pages/6_Mission_Control.py` has three tabs. **Case study** —
+*As built (Phase 12):* `dashboards/views/6_Mission_Control.py` has three tabs. **Case study** —
 "Analyse all shipments" runs `graph.analyse_shipment` for every shipment that is not cancelled
 (one `run_id` each) and summarises documents / risk / demurrage INR / rulebook / checklist; the
 supervised clearance runs (`governance.case_runs`) are listed, decided on Shipping Ops. **Audit
@@ -587,3 +590,17 @@ CMAU7003003 58,344.00). CLI: `python -m scripts.roi capture|list|compare`.
 ## 10. Deployment (native, no Docker)
 
 All processes run natively from the project `.venv`: PostgreSQL is the locally installed server (role + database created once by `scripts/setup_local_db.py`); ChromaDB is embedded in-process, persisting to `CHROMA_PATH`; the `api` process (FastAPI + APScheduler + MCP servers as subprocesses) runs via `uvicorn`; the dashboards run via `streamlit run dashboards/Home.py`. `.env` holds the Postgres connection keys, Chroma path, Gmail secrets path — none of it committed (see `spec_conventions.md` §6). `docker-compose.yml` is used only by the GitHub Actions integration job to provide a throwaway Postgres.
+
+*As built (Phase 13):* there is no FastAPI process. The processes are the Streamlit dashboards
+(`streamlit run dashboards/Home.py`; `.streamlit/config.toml`: headless — no first-run prompt —
+and no file watcher), the MCP servers (stdio subprocesses, started per agent run), and
+optionally the regulatory-watch scheduler in its own terminal (`python -m
+scheduler.watch_scheduler`). Every agent workflow also has a CLI under `scripts/`. A new
+machine needs only Python 3.11+ and PostgreSQL 15+: the README walks through venv → CPU
+PyTorch + `pip install -e ".[dev,models]"` → `.env` → `scripts.setup_local_db` →
+`alembic upgrade head` → `scripts.seed` (which also builds the RAG index) → Streamlit;
+`scripts.setup_local_db --reset` starts the demo data over. Rehearsed on 2026-10-01 from a
+clean clone with a new venv and an empty database (the JNPT demo over stdio MCP reproduced the
+documented figures). `scripts/scan_secrets.py` (also in CI) checks that nothing secret is
+tracked and that `.env`, `secrets/`, `docs/simple_docs/`, Chroma data and the outbox stay
+git-ignored. The demo walk-through is `docs/DEMO_SCRIPT.md`.

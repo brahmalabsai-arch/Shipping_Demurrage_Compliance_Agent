@@ -16,7 +16,7 @@ from scripts import seed_fx_rates
 from services import fx_service as svc
 from tests.fixtures.fx_rates import EUR, JPY, USD
 
-PAGE = str(PROJECT_ROOT / "dashboards" / "pages" / "3_FX_Rates.py")
+PAGE = str(PROJECT_ROOT / "dashboards" / "views" / "3_FX_Rates.py")
 
 
 def _open_page() -> AppTest:
@@ -71,7 +71,7 @@ def test_spot_rate_added_on_the_page_is_immediately_resolvable(
         resolve_check_on=date(2026, 8, 20),
     )
     assert "87.615" in at.success[0].value
-    assert "valid through 2026-08-22" in at.info[0].value
+    assert "valid until 22 Aug 2026" in at.info[0].value
 
 
 def test_expired_quote_is_surfaced_by_the_page(session_factory: sessionmaker[Session]) -> None:
@@ -89,7 +89,7 @@ def test_expired_quote_is_surfaced_by_the_page(session_factory: sessionmaker[Ses
     )
 
     assert "0.5987" in at.success[0].value
-    assert at.warning[0].value.startswith("Quote expired on 2026-09-08")
+    assert at.warning[0].value.startswith("The quote expired on 08 Sep 2026")
 
 
 def test_freight_invoice_on_the_page_uses_the_bol_rate(
@@ -107,7 +107,7 @@ def test_freight_invoice_on_the_page_uses_the_bol_rate(
         resolve_bol_date=date(2026, 8, 25),
     )
 
-    assert "87.9400" in at.success[0].value
+    assert "**87.94**" in at.success[0].value
     assert "locked on bol date 2026-08-25" in at.success[0].value
 
 
@@ -126,7 +126,7 @@ def test_locking_an_already_locked_date_shows_typed_error(
     at.run()
 
     assert not at.exception, at.exception
-    assert at.error[0].value.startswith("RateAlreadyLockedError")
+    assert " is already locked at " in at.error[0].value
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(LockedRate)) == before
 
@@ -167,7 +167,7 @@ def test_zero_rate_is_rejected_by_validation(session_factory: sessionmaker[Sessi
     at.run()
 
     assert not at.exception, at.exception
-    assert "rate" in at.error[0].value
+    assert "rate: input should be greater than 0" in at.error[0].value.lower()
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(LockedRate)) == 0
 
@@ -178,4 +178,4 @@ def test_unresolvable_date_shows_rate_not_found(session_factory: sessionmaker[Se
 
     _resolve(at, FxStage.BOL, USD, date(2026, 8, 29))  # a Saturday with no lock
 
-    assert at.error[0].value.startswith("RateNotFoundError")
+    assert at.error[0].value.startswith("No USD/INR rate locked for bol")

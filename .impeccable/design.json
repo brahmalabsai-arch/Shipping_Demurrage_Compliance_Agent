@@ -1,0 +1,426 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-05T07:33:16+00:00",
+  "title": "Design System: Port & Customs Clearance Copilot",
+  "extensions": {
+    "colorMeta": {
+      "pale-harbour": {
+        "role": "neutral",
+        "displayName": "Pale Harbour",
+        "canonical": "#f4f7ff",
+        "tonalRamp": [
+          "#00154c",
+          "#002485",
+          "#0033bd",
+          "#0043f5",
+          "#2e67ff",
+          "#6690ff",
+          "#a3bcff",
+          "#e5ecff"
+        ]
+      },
+      "paper-white": {
+        "role": "neutral",
+        "displayName": "Paper White",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#262626",
+          "#424242",
+          "#5e5e5e",
+          "#7a7a7a",
+          "#969696",
+          "#b2b2b2",
+          "#d1d1d1",
+          "#f2f2f2"
+        ]
+      },
+      "mist-blue": {
+        "role": "neutral",
+        "displayName": "Mist Blue",
+        "canonical": "#eaf0fd",
+        "tonalRamp": [
+          "#071b46",
+          "#0c2e79",
+          "#1042ac",
+          "#1555e0",
+          "#4077ed",
+          "#739bf2",
+          "#abc3f7",
+          "#e8eefd"
+        ]
+      },
+      "sky-field": {
+        "role": "neutral",
+        "displayName": "Sky Field",
+        "canonical": "#deecff",
+        "tonalRamp": [
+          "#00204c",
+          "#003885",
+          "#0050bd",
+          "#0068f5",
+          "#2e87ff",
+          "#66a7ff",
+          "#a3caff",
+          "#e5f0ff"
+        ]
+      },
+      "sky-block": {
+        "role": "primary",
+        "displayName": "Sky Block",
+        "canonical": "#89bcff",
+        "tonalRamp": [
+          "#00214c",
+          "#003985",
+          "#0052bd",
+          "#006af5",
+          "#2e88ff",
+          "#66a8ff",
+          "#a3cbff",
+          "#e5f1ff"
+        ]
+      },
+      "harbour-ink": {
+        "role": "primary",
+        "displayName": "Harbour Ink",
+        "canonical": "#0e0f18",
+        "tonalRamp": [
+          "#1c1e30",
+          "#313454",
+          "#464a77",
+          "#5a619b",
+          "#7b80b2",
+          "#9ea2c7",
+          "#c5c7dd",
+          "#eff0f6"
+        ]
+      },
+      "slate-ink": {
+        "role": "neutral",
+        "displayName": "Slate Ink",
+        "canonical": "#3f4558",
+        "tonalRamp": [
+          "#20232d",
+          "#373d4d",
+          "#4f566e",
+          "#66708f",
+          "#858da8",
+          "#a6acbf",
+          "#cacdd9",
+          "#f0f1f4"
+        ]
+      },
+      "quiet-ink": {
+        "role": "neutral",
+        "displayName": "Quiet Ink",
+        "canonical": "#5c6378",
+        "tonalRamp": [
+          "#21242b",
+          "#3a3e4b",
+          "#52586b",
+          "#6a728b",
+          "#8990a4",
+          "#a8adbd",
+          "#cbced7",
+          "#f1f1f4"
+        ]
+      },
+      "focus-blue": {
+        "role": "primary",
+        "displayName": "Focus Blue",
+        "canonical": "#0050bd",
+        "tonalRamp": [
+          "#00204c",
+          "#003885",
+          "#0050bd",
+          "#0068f5",
+          "#2e86ff",
+          "#66a7ff",
+          "#a3caff",
+          "#e5f0ff"
+        ]
+      },
+      "ok-green": {
+        "role": "semantic",
+        "displayName": "OK Green",
+        "canonical": "#1d6b4c",
+        "tonalRamp": [
+          "#103c2b",
+          "#1c684a",
+          "#289469",
+          "#34c189",
+          "#5ad2a3",
+          "#87debc",
+          "#b7ebd6",
+          "#ebfaf4"
+        ]
+      },
+      "warn-amber": {
+        "role": "semantic",
+        "displayName": "Warn Amber",
+        "canonical": "#7a5000",
+        "tonalRamp": [
+          "#4c3200",
+          "#855700",
+          "#bd7c00",
+          "#f5a100",
+          "#ffb72e",
+          "#ffca66",
+          "#ffdfa3",
+          "#fff6e5"
+        ]
+      },
+      "stop-coral": {
+        "role": "semantic",
+        "displayName": "Stop Coral",
+        "canonical": "#ad3324",
+        "tonalRamp": [
+          "#3f130d",
+          "#6e2017",
+          "#9c2e21",
+          "#cb3c2a",
+          "#db6152",
+          "#e58b80",
+          "#efbab3",
+          "#fbecea"
+        ]
+      },
+      "night-ground": {
+        "role": "neutral",
+        "displayName": "Night Ground",
+        "canonical": "#0d1018",
+        "tonalRamp": [
+          "#1b2132",
+          "#2f3956",
+          "#42527a",
+          "#566a9f",
+          "#7788b6",
+          "#9ca8c9",
+          "#c3cbdf",
+          "#eef1f6"
+        ]
+      },
+      "night-panel": {
+        "role": "neutral",
+        "displayName": "Night Panel",
+        "canonical": "#151a26",
+        "tonalRamp": [
+          "#1b2231",
+          "#2f3a55",
+          "#43537a",
+          "#576c9e",
+          "#788ab5",
+          "#9ca9c9",
+          "#c4ccde",
+          "#eff1f6"
+        ]
+      },
+      "night-field": {
+        "role": "neutral",
+        "displayName": "Night Field",
+        "canonical": "#192640",
+        "tonalRamp": [
+          "#152137",
+          "#25395f",
+          "#355188",
+          "#4569b0",
+          "#6987c4",
+          "#91a7d4",
+          "#bdcae5",
+          "#edf0f8"
+        ]
+      },
+      "night-block": {
+        "role": "primary",
+        "displayName": "Night Block",
+        "canonical": "#3d6aa6",
+        "tonalRamp": [
+          "#152438",
+          "#243e61",
+          "#33588a",
+          "#4272b3",
+          "#6690c7",
+          "#8fadd6",
+          "#bccee6",
+          "#ecf1f8"
+        ]
+      },
+      "night-ink": {
+        "role": "neutral",
+        "displayName": "Night Ink",
+        "canonical": "#eef2fb",
+        "tonalRamp": [
+          "#0f1d3e",
+          "#19336b",
+          "#244899",
+          "#2f5dc6",
+          "#567ed7",
+          "#83a0e2",
+          "#b5c6ee",
+          "#eaeffa"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "One page title per page."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "The one headline number on a page; lining, tabular numerals."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section titles."
+      },
+      "lede": {
+        "displayName": "Lede",
+        "purpose": "The sentence under a page title."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Prose, table cells, messages."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Widget labels, route-stop labels, table headers."
+      }
+    },
+    "shadows": [
+      {
+        "name": "offset-block-panel",
+        "value": "-7px 7px 0 0 #89bcff",
+        "purpose": "Focus panels: what needs a person."
+      },
+      {
+        "name": "offset-block-button",
+        "value": "-4px 4px 0 0 #89bcff",
+        "purpose": "Primary buttons and the primary page link; sinks to 0 on hover."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-out-strong",
+        "value": "cubic-bezier(0.23, 1, 0.32, 1)",
+        "purpose": "Button sink and press feedback, 160ms."
+      },
+      {
+        "name": "ease-colour",
+        "value": "160ms ease",
+        "purpose": "Hover colour changes."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "mobile",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one action of a block; sits on the sky offset block and sinks into it on hover.",
+      "html": "<button class=\"ds-btn-primary\">Analyse shipment</button>",
+      "css": ".ds-btn-primary{font-family:Outfit,system-ui,sans-serif;font-weight:500;font-size:1rem;background:#0e0f18;color:#fff;border:1px solid #0e0f18;border-radius:0;min-height:2.6rem;padding:0 1rem;box-shadow:-4px 4px 0 0 #89bcff;transition:transform 160ms cubic-bezier(.23,1,.32,1),box-shadow 160ms cubic-bezier(.23,1,.32,1);cursor:pointer}.ds-btn-primary:hover{transform:translate(-4px,4px);box-shadow:0 0 0 0 #89bcff}.ds-btn-primary:active{transform:translate(-4px,4px) scale(.98)}.ds-btn-primary:focus-visible{outline:2px solid #0050bd;outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Every other action.",
+      "html": "<button class=\"ds-btn\">Price it</button>",
+      "css": ".ds-btn{font-family:Outfit,system-ui,sans-serif;font-weight:500;font-size:1rem;background:#fff;color:#0e0f18;border:1px solid rgba(14,15,24,.3);border-radius:0;min-height:2.6rem;padding:0 1rem;transition:background-color 160ms ease,border-color 160ms ease,transform 160ms cubic-bezier(.23,1,.32,1);cursor:pointer}.ds-btn:hover{background:#deecff;border-color:#0e0f18}.ds-btn:active{transform:scale(.98)}.ds-btn:focus-visible{outline:2px solid #0050bd;outline-offset:2px}"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Square field with an ink focus stroke and a sky ring.",
+      "html": "<label class=\"ds-field\"><span>Your name (for the audit trail)</span><input value=\"ops-dashboard\"></label>",
+      "css": ".ds-field{display:grid;gap:.35rem;font-family:Outfit,system-ui,sans-serif;}.ds-field span{font-size:.92rem;font-weight:500;color:#3f4558}.ds-field input{font:inherit;background:#fff;color:#0e0f18;border:1px solid rgba(14,15,24,.3);border-radius:0;padding:.55rem .75rem}.ds-field input:focus{outline:none;border-color:#0e0f18;box-shadow:0 0 0 2px rgba(137,188,255,.45)}"
+    },
+    {
+      "name": "Status Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "A status as a word in a tinted pill; never colour alone.",
+      "html": "<span class=\"ds-chip ds-warn\">Held by customs</span> <span class=\"ds-chip ds-stop\">Must fix</span> <span class=\"ds-chip ds-ok\">Filed and cleared</span>",
+      "css": ".ds-chip{display:inline-flex;align-items:center;font-family:Outfit,system-ui,sans-serif;font-size:.84rem;font-weight:500;padding:.12rem .62rem;border-radius:999px}.ds-warn{color:#7a5000;background:#fbefd2}.ds-stop{color:#ad3324;background:#fde6e2}.ds-ok{color:#1d6b4c;background:#e2f3ea}"
+    },
+    {
+      "name": "Focus Panel",
+      "kind": "card",
+      "refersTo": "focus-panel",
+      "description": "The offset block: what needs a person.",
+      "html": "<section class=\"ds-focus\"><h3>Waiting on a person</h3><p>Nothing is waiting on anyone right now.</p></section>",
+      "css": ".ds-focus{background:#fff;border:1px solid #0e0f18;box-shadow:-7px 7px 0 0 #89bcff;padding:1.35rem 1.5rem;margin-left:7px;font-family:Outfit,system-ui,sans-serif;color:#0e0f18}.ds-focus h3{font-family:'Young Serif',Georgia,serif;font-weight:400;font-size:1.45rem;margin:0 0 .5rem}.ds-focus p{margin:0}"
+    },
+    {
+      "name": "Top Navigation",
+      "kind": "nav",
+      "refersTo": "",
+      "description": "Top bar of pages; the current page in ink with a 2px underline.",
+      "html": "<nav class=\"ds-nav\"><a>Overview</a><a aria-current=\"page\">Shipping Ops</a><a>Compliance</a></nav>",
+      "css": ".ds-nav{display:flex;gap:.4rem;font-family:Outfit,system-ui,sans-serif;}.ds-nav a{padding:.35rem .55rem;color:#3f4558;font-weight:500;text-decoration:none;cursor:pointer}.ds-nav a:hover{background:#deecff}.ds-nav a[aria-current=page]{color:#0e0f18;font-weight:600;box-shadow:inset 0 -2px 0 #0e0f18}"
+    },
+    {
+      "name": "Route Line",
+      "kind": "custom",
+      "refersTo": "",
+      "description": "The shipment lifecycle as a line of stops: passed in sky, current in ink.",
+      "html": "<div class=\"ds-route\"><div class=\"ds-stop ds-passed\"><b>Booked</b></div><div class=\"ds-stop ds-here\"><b>Docked</b></div><div class=\"ds-stop\"><b>Cleared</b></div></div>",
+      "css": ".ds-route{display:grid;grid-template-columns:repeat(3,1fr);position:relative;font-family:Outfit,system-ui,sans-serif;}.ds-route:before{content:'';position:absolute;left:0;right:0;top:7px;height:1px;background:rgba(14,15,24,.3)}.ds-stop{position:relative;padding-top:1.35rem}.ds-stop:before{content:'';position:absolute;top:0;left:0;width:13px;height:13px;border-radius:50%;border:1px solid rgba(14,15,24,.3);background:#f4f7ff}.ds-passed:before{background:#89bcff;border-color:#89bcff}.ds-here:before{background:#0e0f18;border-color:#0e0f18;box-shadow:0 0 0 4px rgba(137,188,255,.45)}.ds-stop b{font-weight:500;font-size:.92rem;color:#3f4558}.ds-here b{color:#0e0f18;font-weight:600}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Harbour Brochure That Works",
+    "overview": "The desk borrows the calm of the Muselogist logistics site (pale-blue ground, ink type, sky-blue fields, square shapes with a hard offset block) and turns it into a working tool. A demo audience should see what is waiting on a person and what the agents saved before reading any table. Then they should be able to follow one shipment from papers checked to filed. The pages talk like an operator, not like the code.",
+    "keyCharacteristics": [
+      "Pale-blue ground with white panels and ink hairlines; dark mode mirrors every role.",
+      "Young Serif for page titles, section titles and big figures; Outfit for everything else.",
+      "Square corners everywhere except the status chips, which are pills.",
+      "One signature move, the offset block, used only on what needs a person and on primary actions.",
+      "One product move: the shipment lifecycle drawn as a route line."
+    ],
+    "rules": [
+      {
+        "name": "The Word-With-Colour Rule",
+        "body": "Status is never shown by colour alone. Every chip, alert and route stop carries its word.",
+        "section": "colors"
+      },
+      {
+        "name": "The Coral-Is-For-Blockers Rule",
+        "body": "Stop Coral appears only where something blocks clearance or a filing was rejected.",
+        "section": "colors"
+      },
+      {
+        "name": "The Lining Numerals Rule",
+        "body": "Every serif number sets font-variant-numeric: lining-nums (plus tabular-nums in columns).",
+        "section": "typography"
+      },
+      {
+        "name": "The One Block Rule",
+        "body": "At most one or two offset blocks per viewport. If everything is elevated, nothing is waiting.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do write labels and messages in operator words, and put internal ids in an expander.",
+      "Do put what needs a person in a focus panel at the top of the page, before tables.",
+      "Do add every new colour as a token in both LIGHT and DARK in dashboards/theme.py.",
+      "Do set serif numbers with lining figures.",
+      "Do show tables through theme.table so they follow the theme."
+    ],
+    "donts": [
+      "Don't use st.dataframe on a page.",
+      "Don't signal status by colour alone.",
+      "Don't round corners on panels, inputs or buttons.",
+      "Don't add blur shadows or gradients.",
+      "Don't use em dashes or Python class names in visible copy.",
+      "Don't put more than two offset blocks in one viewport."
+    ]
+  }
+}

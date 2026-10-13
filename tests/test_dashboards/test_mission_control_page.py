@@ -12,7 +12,7 @@ from config.settings import PROJECT_ROOT
 from scripts import seed_compliance, seed_fx_rates, seed_port_rates, seed_shipments
 from services import roi_service
 
-PAGE = str(PROJECT_ROOT / "dashboards" / "pages" / "6_Mission_Control.py")
+PAGE = str(PROJECT_ROOT / "dashboards" / "views" / "6_Mission_Control.py")
 AS_OF = date(2026, 9, 28)
 
 
@@ -45,7 +45,7 @@ def test_roi_capture_and_compare_on_the_page(
     at.button(key="roi_capture_submit").click()
     at.run()
     assert not at.error, [e.value for e in at.error]
-    assert at.success[0].value == "Captured ROI snapshot 'fixtures'."
+    assert at.toast[0].value == "Captured ROI snapshot 'fixtures'."
 
     at.button(key="roi_compare").click()
     at.run()
@@ -53,8 +53,8 @@ def test_roi_capture_and_compare_on_the_page(
     assert not at.exception, at.exception
     metrics = {m.label: m.value for m in at.metric}
     assert metrics["Demurrage avoided (INR)"] == "82,212.00"
-    assert metrics["Exposure with the agents (INR)"] == "0.00"
-    lines = at.dataframe[-1].value
+    assert metrics["With the agents (INR)"] == "0.00"
+    lines = at.table[-1].value
     assert dict(zip(lines["Container"], lines["Avoided (INR)"], strict=True))["MSCU7002002"] == (
         "23,868.00"
     )
@@ -70,25 +70,25 @@ def test_a_duplicate_snapshot_name_is_refused(
         at.text_input(key="roi_name").set_value("dup")
         at.button(key="roi_capture_submit").click()
         at.run()
-    assert at.error[0].value.startswith("DuplicateSnapshotNameError")
+    assert at.error[0].value == "An ROI snapshot named 'dup' exists"
 
 
 def test_analyse_all_then_follow_one_run_in_the_audit_trail(
     seeded: None, session_factory: sessionmaker[Session], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(graph, "stdio_connector", memory_connector)
-    monkeypatch.setattr(graph, "today_ist", lambda: AS_OF)
     at = _open_page()
+    at.date_input(key="analysis_as_of").set_value(AS_OF)
 
     at.button(key="analyse_all").click()
     at.run()
 
     assert not at.exception, at.exception
-    table = at.dataframe[0].value
+    table = at.table[0].value
     assert set(table["Container"]) == {"MSKU7001001", "MSCU7002002", "CMAU7003003",
                                        "HLXU7004004"}  # fmt: skip
-    rows = dict(zip(table["Container"], table["Documents"], strict=True))
-    assert rows["MSCU7002002"] == "quantity_mismatch" and rows["MSKU7001001"] == "clear"
+    rows = dict(zip(table["Container"], table["Papers"], strict=True))
+    assert rows["MSCU7002002"] == "Quantities disagree" and rows["MSKU7001001"] == "In order"
     results = at.session_state["mc_analysis"]
     run_id = next(case.run_id for shipment, case in results
                   if shipment.container_id == "MSCU7002002")  # fmt: skip
@@ -96,8 +96,7 @@ def test_analyse_all_then_follow_one_run_in_the_audit_trail(
     at.text_input(key="audit_run").set_value(run_id)
     at.run()
 
-    trail = at.dataframe[1].value  # [0] analysis, [1] audit trail (no clearance runs table)
-    assert set(trail["Action"]) == {"document_verification.completed",
-                                    "demurrage_risk.completed", "compliance_rag.completed",
-                                    "clearance_checklist.completed"}  # fmt: skip
+    trail = at.table[1].value  # [0] analysis, [1] audit trail (no clearance runs table)
+    assert set(trail["What happened"]) == {"Papers checked", "Demurrage and risk assessed",
+                                           "Rulebook consulted", "Checklist built"}  # fmt: skip
     assert set(trail["Run"]) == {run_id[:8]}

@@ -73,7 +73,9 @@ def _citations(finding: ComplianceFinding) -> list[str]:
 
 
 def _document_item(d: Discrepancy, guidance: ComplianceFinding | None) -> ChecklistItem:
-    sources = sorted(str(o.document_id or o.source) for o in d.observed)
+    # A document is named by its id; the shipment record by what was read from it, so two
+    # findings about the record (e.g. no FX rate on two different dates) stay two items.
+    sources = sorted(str(o.document_id or f"{o.source}={o.value}") for o in d.observed)
     return ChecklistItem(
         key=f"document:{d.code}:{d.field}:{','.join(sources)}",
         source_agent=d.agent,

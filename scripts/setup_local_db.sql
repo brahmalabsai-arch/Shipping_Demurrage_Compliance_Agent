@@ -9,6 +9,12 @@ WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'app_user') \gexec
 -- Always re-applied so the role's password tracks .env.
 SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', :'app_user', :'app_password') \gexec
 
+-- --reset only: start the app database over (every record in it is deleted; the test DB is
+-- rebuilt by pytest anyway). FORCE ends open sessions, e.g. a running dashboard.
+\if :reset
+SELECT format('DROP DATABASE IF EXISTS %I WITH (FORCE)', :'app_db') \gexec
+\endif
+
 SELECT format('CREATE DATABASE %I OWNER %I', :'app_db', :'app_user')
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'app_db') \gexec
 

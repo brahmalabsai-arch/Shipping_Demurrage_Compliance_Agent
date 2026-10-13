@@ -5,6 +5,11 @@ database name and password come from ``config.Settings``; psql prompts for the *
 password itself, so that password is never written to disk.
 
     .venv\\Scripts\\python.exe -m scripts.setup_local_db [--superuser postgres] [--psql PATH]
+    .venv\\Scripts\\python.exe -m scripts.setup_local_db --reset   # drop + recreate the app DB
+
+``--reset`` deletes the application database and everything in it (after you type its name),
+then creates it empty; follow with ``alembic upgrade head``, ``python -m scripts.seed`` and
+``python -m scripts.index_rulebook`` (README, "Start over").
 """
 
 import argparse
@@ -33,6 +38,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--superuser", default="postgres", help="Postgres superuser to connect as")
     parser.add_argument("--psql", default=None, help="Path to psql (auto-detected if omitted)")
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help="drop and recreate the application database (asks you to confirm)",
+    )
     args = parser.parse_args()
 
     psql = args.psql or find_psql()
@@ -41,6 +51,14 @@ def main() -> int:
         return 1
 
     settings = get_settings()
+    if args.reset:
+        typed = input(
+            f"This deletes the database '{settings.postgres_db}' and every record in it. "
+            "Type its name to confirm: "
+        )
+        if typed.strip() != settings.postgres_db:
+            print("Not confirmed — nothing was changed.", file=sys.stderr)
+            return 1
     command = [
         psql,
         "--host", settings.postgres_host,
@@ -51,6 +69,7 @@ def main() -> int:
         "--set", f"app_password={settings.postgres_password.get_secret_value()}",
         "--set", f"app_db={settings.postgres_db}",
         "--set", f"app_test_db={settings.postgres_test_db}",
+        "--set", f"reset={'true' if args.reset else 'false'}",
         "--file", str(SQL_FILE),
     ]  # fmt: skip
     result = subprocess.run(command, check=False)

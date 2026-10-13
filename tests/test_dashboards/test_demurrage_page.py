@@ -13,7 +13,7 @@ from models.db_models import PortRate
 from models.enums import ContainerType
 from services import demurrage_service as svc
 
-PAGE = str(PROJECT_ROOT / "dashboards" / "pages" / "2_Demurrage.py")
+PAGE = str(PROJECT_ROOT / "dashboards" / "views" / "2_Demurrage.py")
 
 
 def _open_page() -> AppTest:
@@ -65,7 +65,7 @@ def test_negative_daily_rate_in_form_is_rejected_before_the_service(
     at.run()
 
     assert not at.exception, at.exception
-    assert "daily_rate" in at.error[0].value
+    assert "daily rate" in at.error[0].value.lower()
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(PortRate)) == 0
 
@@ -78,4 +78,4 @@ def test_lookup_for_unconfigured_port_shows_typed_error(
     at.run()
 
     assert not at.exception, at.exception
-    assert at.error[0].value.startswith("PortRateNotFoundError")
+    assert at.error[0].value.startswith("No demurrage tariff for INNSA")

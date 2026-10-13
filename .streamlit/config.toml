@@ -1,0 +1,43 @@
+# Streamlit settings for the dashboards.
+[server]
+# No first-run prompt and no browser auto-open: open http://localhost:8501 yourself.
+headless = true
+port = 8501
+# The file watcher walks every imported package; with the RAG models loaded it logs hundreds of
+# harmless "No module named 'torchvision'" tracebacks from transformers. Restart to reload code.
+fileWatcherType = "none"
+# Serves dashboards/static/ (the bundled fonts) at app/static/ — no runtime font download.
+enableStaticServing = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# No Deploy button or developer menu items in the demo.
+toolbarMode = "minimal"
+# Home.py routes with a top bar over dashboards/views/; never show an automatic page list in
+# the sidebar.
+showSidebarNavigation = false
+
+# The light theme of Streamlit's own widgets; dashboards/theme.py layers the full design (and
+# the dark theme chosen with the sidebar toggle) on top. Keep the two palettes in step.
+[theme]
+base = "light"
+primaryColor = "#0e0f18"
+backgroundColor = "#f4f7ff"
+secondaryBackgroundColor = "#eaf0fd"
+textColor = "#0e0f18"
+linkColor = "#0e0f18"
+borderColor = "#cdd6ea"
+showWidgetBorder = true
+baseRadius = "0px"
+buttonRadius = "0px"
+font = "Outfit, sans-serif"
+headingFont = "Young Serif, Georgia, serif"
+fontFaces = [
+  { family = "Outfit", url = "app/static/fonts/Outfit-Variable.ttf", weight = "100 900" },
+  { family = "Young Serif", url = "app/static/fonts/YoungSerif-Regular.ttf", weight = "400" },
+]
+
+[theme.sidebar]
+backgroundColor = "#eaf0fd"

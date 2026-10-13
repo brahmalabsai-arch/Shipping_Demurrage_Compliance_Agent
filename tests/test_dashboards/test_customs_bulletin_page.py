@@ -17,7 +17,7 @@ from services import bulletin_service as svc
 from services import compliance_service
 from tests.fixtures.compliance import BASELINE_BULLETIN, edit_section
 
-PAGE = str(PROJECT_ROOT / "dashboards" / "pages" / "5_Customs_Bulletin.py")
+PAGE = str(PROJECT_ROOT / "dashboards" / "views" / "5_Customs_Bulletin.py")
 SCANNER = "watch-scheduler"
 
 
@@ -70,11 +70,11 @@ def test_dashboard_edit_then_diff_twice_returns_none_the_second_time(
 
 def test_first_publish_on_an_empty_system(session_factory: sessionmaker[Session]) -> None:
     at = _open_page()
-    assert "Nothing published yet" in at.info[0].value
+    assert any("Nothing published yet" in i.value for i in at.info)
 
     _publish_on_page(at, BASELINE_BULLETIN)
 
-    assert at.success[0].value.startswith("Bulletin published")
+    assert at.toast[0].value.startswith("Bulletin published")
     with session_factory() as session:
         assert svc.get_publication(session).updated_by == "bulletin-editor"
     assert _snapshot_count(session_factory) == 0
@@ -88,7 +88,7 @@ def test_malformed_bulletin_is_rejected_with_typed_error(
 
     _publish_on_page(at, BASELINE_BULLETIN.replace("Effective: 2026-04-01\n", "", 1))
 
-    assert at.error[0].value.startswith("InvalidBulletinError")
+    assert "needs 'Effective: YYYY-MM-DD'" in at.error[0].value
     with session_factory() as session:
         assert svc.get_publication(session).content == BASELINE_BULLETIN
 
@@ -124,7 +124,7 @@ def test_run_scan_button_fires_the_watch_job(
 
     assert not at.exception, at.exception
     assert not at.error, [e.value for e in at.error]
-    assert at.success[0].value.startswith("Scan complete: 1 proposal(s) pending review")
+    assert at.toast[0].value.startswith("Scan complete: 1 proposal(s) pending review")
     with session_factory() as session:
         [pending] = compliance_service.list_pending(session)
     assert pending.rule_key == "HSN-8708-duty"
@@ -143,6 +143,6 @@ def test_scans_tab_compares_the_latest_scan_with_the_rulebook(
 
     at = _open_page()
 
-    drift = at.dataframe[1].value
+    drift = next(t.value for t in at.table if "Bulletin text (latest scan)" in t.value.columns)
     assert list(drift["Rule"]) == ["HSN-8708-duty"]
     assert list(drift["Status"]) == ["not proposed yet (the next scan will)"]

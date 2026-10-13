@@ -2,6 +2,7 @@
 .env
 secrets/
 docs/simple_docs/
+.streamlit/secrets.toml
 
 # --- Python ---
 __pycache__/

@@ -24,7 +24,7 @@ from agents import (
 )
 from agents.clearance_checklist_agent import build_checklist
 from agents.mcp_clients import memory_connector
-from agents.state import AgentFailure, CaseState, ComplianceFinding, Discrepancy
+from agents.state import AgentFailure, CaseState, ComplianceFinding, Discrepancy, ObservedValue
 from config.settings import get_settings
 from models.db_models import AuditEvent
 from models.enums import ShipmentStatus
@@ -82,6 +82,25 @@ def test_duplicate_findings_collapse_into_one_item() -> None:
 
     assert len([i for i in items if i.category == "document"]) == 1
     assert len({i.key for i in items}) == len(items)
+
+
+def test_two_findings_about_the_shipment_record_stay_two_items() -> None:
+    """No FX rate on the bill of lading date *and* on the invoice date: both are read from the
+    shipment record, so the record's value (the date) tells them apart."""
+
+    def no_rate(day: str) -> Discrepancy:
+        return Discrepancy(code="fx_rate_unavailable", field="fx_rate", agent=DV,
+                           message=f"No USD/INR rate for {day}",
+                           observed=[ObservedValue(source="shipment record", value=day)])  # fmt: skip
+
+    state = case(document_outcome="flagged",
+                 document_discrepancies=[no_rate("2026-09-10"), no_rate("2026-09-02")])  # fmt: skip
+
+    unavailable = [i for i in build_checklist(state).items if i.title == "fx rate unavailable"]
+
+    assert sorted(i.detail for i in unavailable) == [
+        "No USD/INR rate for 2026-09-02", "No USD/INR rate for 2026-09-10"
+    ]  # fmt: skip
 
 
 def test_a_failed_upstream_agent_is_a_missing_input_not_a_failed_checklist() -> None:

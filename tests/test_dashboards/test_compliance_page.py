@@ -3,6 +3,7 @@ by a registered reviewer (``compliance_service.decide``; Phase 11 registry) chan
 status; an approval in force can be revoked (Phase 11)."""
 
 from datetime import date
+from typing import Any
 
 import pytest
 from sqlalchemy.orm import Session, sessionmaker
@@ -18,11 +19,16 @@ from services import compliance_service as svc
 from services import governance_service, shipping_service
 from tests.fixtures.shipments import make_shipment
 
-PAGE = str(PROJECT_ROOT / "dashboards" / "pages" / "4_Compliance.py")
+PAGE = str(PROJECT_ROOT / "dashboards" / "views" / "4_Compliance.py")
 KEY = "HSN-8708-duty"
 
 
 REVIEWER = "Asha Rao"  # registered in tests/conftest.py
+
+
+def table_with(at: AppTest, column: str) -> Any:
+    """The (last) table on the page that has this column."""
+    return next(t.value for t in reversed(at.table) if column in t.value.columns)
 
 
 def _open_page(reviewer: str = "") -> AppTest:
@@ -64,7 +70,7 @@ def test_approve_click_with_reviewer_puts_the_new_version_in_force(
 
     assert not at.exception, at.exception
     assert not at.error, [e.value for e in at.error]
-    assert at.success[0].value.startswith(f"Approved {KEY} v2")
+    assert at.toast[0].value.startswith(f"Approved {KEY} v2")
     with session_factory() as session:
         current = svc.get_current_rule(session, KEY)
         assert (current.id, current.decided_by) == (proposal.id, REVIEWER)
@@ -133,7 +139,7 @@ def test_invalid_proposal_shows_validation_error(session_factory: sessionmaker[S
     at.button(key="propose_submit_new").click()
     at.run()
 
-    assert "rule_key" in at.error[0].value
+    assert "rule key" in at.error[0].value.lower()
     with session_factory() as session:
         assert svc.list_rules(session) == []
 
@@ -141,12 +147,12 @@ def test_invalid_proposal_shows_validation_error(session_factory: sessionmaker[S
 def test_rulebook_filters_by_hs_code(session_factory: sessionmaker[Session]) -> None:
     seed_compliance.seed()
     at = _open_page()
-    assert len(at.dataframe[0].value) == 6
+    assert len(at.table[0].value) == 6
 
     at.text_input(key="rulebook_hs").set_value("87084000")  # gearboxes: not brakes
     at.run()
 
-    rules = set(at.dataframe[0].value["Rule"])
+    rules = set(at.table[0].value["Rule"])
     assert "HSN-870830-brake-certification" not in rules
     assert {"HSN-8708-duty", "ORG-KR-CEPA", "DOC-quantity-consistency"} <= rules
 
@@ -158,7 +164,7 @@ def test_reject_without_a_reason_is_refused(session_factory: sessionmaker[Sessio
     at.button(key=f"reject_{proposal.id}").click()
     at.run()
 
-    assert at.error[0].value.startswith("InvalidDecisionError: a rejection must give a reason")
+    assert at.error[0].value == "A rejection must give a reason"
     with session_factory() as session:
         assert svc.get_rule(session, proposal.id).status is RuleStatus.PENDING
 
@@ -187,7 +193,7 @@ def test_card_compares_with_the_rule_in_force_and_shows_history(
     [diff] = [c.value for c in at.code if "(in force)" in c.value]
     assert "--- v1 (in force)" in diff and "+++ v3 (proposed)" in diff
     assert "-15% of the assessable" in diff and "+25% of the assessable" in diff
-    history = at.dataframe[1].value  # [0] rulebook in force, [1] all versions
+    history = table_with(at, "Revocation reason")  # All versions
     assert "awaiting official notification" in set(history["Reason"])
 
 
@@ -211,7 +217,7 @@ def test_ask_the_rulebook_answers_with_a_citation(
     assert not at.error, [e.value for e in at.error]
     [answer] = at.success
     assert answer.value.startswith("Per [DOC-commercial-invoice-required v1]")
-    citations = at.dataframe[-1].value
+    citations = table_with(at, "Relevance")
     assert citations.loc[0, "Rule"] == "DOC-commercial-invoice-required"
 
 
@@ -244,21 +250,21 @@ def test_revoke_puts_the_previous_version_back_in_force(
     at.selectbox(key="revoke_pick").set_value(f"{KEY} v2")
     at.button(key="revoke_submit").click()
     at.run()
-    assert at.error[0].value.startswith("InvalidDecisionError: a revocation must give a reason")
+    assert at.error[0].value == "A revocation must give a reason"
 
     at.text_input(key="revoke_reason").set_value("notification withdrawn")
     at.button(key="revoke_submit").click()
     at.run()
 
     assert not at.error, [e.value for e in at.error]
-    assert at.success[0].value == f"Revoked {KEY} v2 (by Vikram Shah)."
+    assert at.toast[0].value == f"Revoked {KEY} v2 (by Vikram Shah)."
     with session_factory() as session:
         revoked = svc.get_rule(session, proposal.id)
         assert (revoked.status, revoked.decided_by, revoked.revoked_by) == (
             RuleStatus.REVOKED, REVIEWER, "Vikram Shah"
         )  # fmt: skip
         assert svc.get_current_rule(session, KEY).version == 1
-    history = at.dataframe[1].value
+    history = table_with(at, "Revocation reason")
     assert "notification withdrawn" in set(history["Revocation reason"])
 
 
